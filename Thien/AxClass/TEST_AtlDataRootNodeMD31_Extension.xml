@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_AtlDataRootNodeMD31_Extension</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// Adds the MD31 node to the ATL root, the way AtlApplicationSuite adds invent(), sales()
+/// and the other modules (AtlDataRootApplicationSuite_Extension).
+/// </summary>
+[ExtensionOf(classStr(AtlDataRootNode))]
+final class TEST_AtlDataRootNodeMD31_Extension
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>md31</Name>
+				<Source><![CDATA[
+    public TEST_AtlDataMD31 md31()
+    {
+        return new TEST_AtlDataMD31();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12SeedingJob08</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 test case 8 - negative counting variance.
+/// SJPMDInventCountingBatchService::createJournal derives
+/// Qty = Counted - InventOnHand, so seeding a Counted BELOW current on-hand
+/// must produce a journal line with a negative Qty (a stock write-down).
+/// Needs an item that already has physical on-hand in the warehouse; run
+/// TEST_CreateAndPostMovementJournalJob first if the warehouse is empty.
+/// </summary>
+public final class TEST_MD12SeedingJob08
+{
+    #define.TestCase(8)
+    #define.FileName('TEST_MD12_TC08')
+    #define.Shortfall(3)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        info(TEST_MD12SeedingJob08::seed());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seed</Name>
+				<Source><![CDATA[
+    public static str seed(SJPMDInventCountingWarehouseId _warehouseA = '',
+                           SJPMDInventCountingWarehouseId _warehouseB = '')
+    {
+        SJPMDInventCountingWarehouseId warehouseId  = TEST_MD12SeedDataHelper::resolveWarehouse(1, _warehouseA);
+        SJPMDInventCountingLocationId  locationId   = TEST_MD12SeedDataHelper::resolveLocation(warehouseId);
+        SJPMDInventCountingDate        countingDate = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
+        container                      items        = TEST_MD12SeedDataHelper::resolveItems(warehouseId, 1);
+        ItemId                         itemId       = conPeek(items, 1);
+        real                           onHand;
+        real                           counted;
+        int                            purged;
+
+        onHand = TEST_MD12SeedDataHelper::onHandQty(itemId, warehouseId);
+
+        if (onHand <= #Shortfall)
+        {
+            throw error(strFmt('TEST_MD12: TC08 needs on-hand greater than %1 for item %2 in warehouse %3, found %4. Post a movement journal first.',
+                               #Shortfall, itemId, warehouseId, onHand));
+        }
+
+        counted = onHand - #Shortfall;
+
+        ttsbegin;
+        purged = TEST_MD12SeedDataHelper::purgeFileName(#FileName);
+
+        TEST_MD12SeedDataHelper::insertRow(
+            #FileName,
+            #FileName,
+            TEST_MD12SeedDataHelper::voucherNumber(#TestCase, 1),
+            countingDate,
+            warehouseId,
+            locationId,
+            itemId,
+            counted);
+        ttscommit;
+
+        return strFmt('TC08 | file %1 | 1 group (%2 / %3) | item %4 on-hand %5, counted %6 | expect journal line Qty = -%7 | purged %8',
+                      #FileName, countingDate, warehouseId, itemId, onHand, counted, #Shortfall, purged);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_RunTestDataPreparationSmokeJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public final class TEST_RunTestDataPreparationSmokeJob
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        ItemId          itemId;
+        JournalId       journalId;
+        SalesId         salesId;
+        CustInvoiceJour custInvoiceJour;
+
+        URLUtility    urlUtility = new URLUtility();
+        str           argsStr    = urlUtility.getQueryParamValue('args');
+        container     argsCon    = str2con(argsStr, ';', false);
+
+        itemId = conPeek(argsCon,1);
+        str InventLocationId = conPeek(argsCon,2);
+
+        /*
+        int i;
+        str currentProductNumber;
+
+        for (i = 1; i <= 10; i++)
+        {
+            currentProductNumber = productNumber + int2Str(i);
+            Z_CreateNewReleasedProduct::createItem(currentProductNumber, 'Audio', 'WA', 'DEFAULT');
+        }
+        */
+
+
+        
+        if (!InventTable::find(itemId).RecId)
+        {
+            itemId = TEST_CreateReleasedProductJob::createReleasedProduct(itemId);
+            info(strFmt('%1 is created', itemId));
+        }
+       
+        journalId = TEST_CreateAndPostMovementJournalJob::createAndPostForItem(itemId, 1, 1000);
+
+        if (InventJournalTable::find(journalId).Posted != NoYes::Yes)
+        {
+            throw error(strFmt("Journal %1 is not created and posted", journalId));
+        }
+
+        info(journalId);
+        
+        salesId = TEST_CreateAndPostSalesOrderInvoiceJob::createAndPostSalesInvoice(itemId, 1);
+               
+        select firstonly custInvoiceJour
+            order by RecId desc
+            where custInvoiceJour.SalesId == salesId;
+
+        if (!custInvoiceJour.RecId)
+        {
+            error(strFmt("Sales %1 is not found", salesId ));
+
+        }
+        else
+        {
+            info(strFmt("Invoice %1 is created for Sales %2", custInvoiceJour.InvoiceId, salesId));
+        }
+        
+        
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveDefaultInventDim</Name>
+				<Source><![CDATA[
+    public static InventDim resolveDefaultInventDim(InventLocationId _inventLocationId = '001000')
+    {
+        InventLocation inventLocation;
+        InventDim      inventDim;
+
+        select firstonly inventLocation
+            where inventLocation.InventLocationId == _inventLocationId
+               && inventLocation.InventSiteId == 'DMG';
+
+        if (!inventLocation.RecId)
+        {
+            throw Exception::Error;
+        }
+
+        inventDim.InventSiteId     = inventLocation.InventSiteId;
+        inventDim.InventLocationId = inventLocation.InventLocationId;
+
+        return InventDim::findOrCreate(inventDim);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

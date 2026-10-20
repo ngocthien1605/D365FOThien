@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12SeedingJob09</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 test case 15 - error isolation between journal groups.
+/// Seeds ONE file holding two journal groups (split by counting date):
+///   - today     : valid items, must post and then be archived (rows disappear
+///                 from SJPMDInventCountingAddOn, appear in the archive as Completed).
+///   - yesterday : a deliberately non-existent ItemId, must fail validation and
+///                 leave its rows at Status = Error with ErrorFlag = Yes.
+/// The run must NOT abort: the good group is expected to complete regardless.
+/// </summary>
+public final class TEST_MD12SeedingJob09
+{
+    #define.TestCase(9)
+    #define.FileName('TEST_MD12_TC09')
+    #define.MissingItemId('ZZ_NO_ITEM_ZZ')
+    #define.GoodItemCount(2)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        info(TEST_MD12SeedingJob09::seed());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seed</Name>
+				<Source><![CDATA[
+    public static str seed(SJPMDInventCountingWarehouseId _warehouseA = '',
+                           SJPMDInventCountingWarehouseId _warehouseB = '')
+    {
+        SJPMDInventCountingWarehouseId warehouseId = TEST_MD12SeedDataHelper::resolveWarehouse(1, _warehouseA);
+        SJPMDInventCountingLocationId  locationId  = TEST_MD12SeedDataHelper::resolveLocation(warehouseId);
+        SJPMDInventCountingDate        goodDate    = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
+        SJPMDInventCountingDate        badDate     = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet() - 1);
+        container                      items       = TEST_MD12SeedDataHelper::resolveItems(warehouseId, #GoodItemCount);
+        ItemId                         itemId;
+        int                            idx;
+        int                            purged;
+
+        if (InventTable::find(#MissingItemId).RecId)
+        {
+            throw error(strFmt('TEST_MD12: TC09 relies on %1 NOT existing, but it does. Pick a different placeholder.', #MissingItemId));
+        }
+
+        ttsbegin;
+        purged = TEST_MD12SeedDataHelper::purgeFileName(#FileName);
+
+        // Good group - valid items, expected to post and archive.
+        for (idx = 1; idx <= conLen(items); idx++)
+        {
+            itemId = conPeek(items, idx);
+
+            TEST_MD12SeedDataHelper::insertRow(
+                #FileName, #FileName,
+                TEST_MD12SeedDataHelper::voucherNumber(#TestCase, idx),
+                goodDate, warehouseId, locationId, itemId,
+                TEST_MD12SeedDataHelper::onHandQty(itemId, warehouseId) + idx);
+        }
+
+        // Bad group - unknown item, expected to fail validateJournalGroup only for itself.
+        TEST_MD12SeedDataHelper::insertRow(
+            #FileName, #FileName,
+            TEST_MD12SeedDataHelper::voucherNumber(#TestCase, 90),
+            badDate, warehouseId, locationId, #MissingItemId, 7);
+
+        ttscommit;
+
+        return strFmt('TC15 | file %1 | good group %2 / %3 (%4 rows) + bad group %5 / %3 (item %6) | expect 1 journal posted and the bad rows at Status = Error | purged %7',
+                      #FileName, goodDate, warehouseId, conLen(items), badDate, #MissingItemId, purged);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

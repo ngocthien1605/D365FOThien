@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12SeedingJob06</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 test case 6 - TWO files, identical warehouse and identical counting date.
+/// Proves FileName is genuinely part of the journal group key: the rows would
+/// otherwise collapse into one group, but must instead produce two journals.
+/// Also the case to use when checking the optional FileName filter on the
+/// batch dialog - running with FileName = TEST_MD12_TC06_A must leave the
+/// _B rows untouched at Status = New.
+/// </summary>
+public final class TEST_MD12SeedingJob06
+{
+    #define.TestCase(6)
+    #define.FileNameA('TEST_MD12_TC06_A')
+    #define.FileNameB('TEST_MD12_TC06_B')
+    #define.ItemsPerFile(2)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        info(TEST_MD12SeedingJob06::seed());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seed</Name>
+				<Source><![CDATA[
+    public static str seed(SJPMDInventCountingWarehouseId _warehouseA = '',
+                           SJPMDInventCountingWarehouseId _warehouseB = '')
+    {
+        SJPMDInventCountingWarehouseId warehouseId  = TEST_MD12SeedDataHelper::resolveWarehouse(1, _warehouseA);
+        SJPMDInventCountingDate        countingDate = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
+        int                            rows         = 0;
+        int                            purged       = 0;
+
+        ttsbegin;
+        purged += TEST_MD12SeedDataHelper::purgeFileName(#FileNameA);
+        purged += TEST_MD12SeedDataHelper::purgeFileName(#FileNameB);
+
+        rows += TEST_MD12SeedingJob06::seedFile(#FileNameA, warehouseId, countingDate, 1);
+        rows += TEST_MD12SeedingJob06::seedFile(#FileNameB, warehouseId, countingDate, 10);
+        ttscommit;
+
+        return strFmt('TC06 | files %1 + %2 | 2 groups, same warehouse %3 and same date %4 | %5 rows | expect 2 journals | purged %6',
+                      #FileNameA, #FileNameB, warehouseId, countingDate, rows, purged);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seedFile</Name>
+				<Source><![CDATA[
+    private static int seedFile(SJPMDInventCountingFileName    _fileName,
+                                SJPMDInventCountingWarehouseId _warehouseId,
+                                SJPMDInventCountingDate        _countingDate,
+                                int                            _voucherSeed)
+    {
+        SJPMDInventCountingLocationId locationId = TEST_MD12SeedDataHelper::resolveLocation(_warehouseId);
+        container                     items      = TEST_MD12SeedDataHelper::resolveItems(_warehouseId, #ItemsPerFile);
+        ItemId                        itemId;
+        int                           idx;
+
+        for (idx = 1; idx <= conLen(items); idx++)
+        {
+            itemId = conPeek(items, idx);
+
+            TEST_MD12SeedDataHelper::insertRow(
+                _fileName,
+                _fileName,
+                TEST_MD12SeedDataHelper::voucherNumber(#TestCase, _voucherSeed + idx),
+                _countingDate,
+                _warehouseId,
+                locationId,
+                itemId,
+                TEST_MD12SeedDataHelper::onHandQty(itemId, _warehouseId) + _voucherSeed + idx);
+        }
+
+        return conLen(items);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

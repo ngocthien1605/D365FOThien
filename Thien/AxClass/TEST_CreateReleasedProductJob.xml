@@ -1,0 +1,586 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_CreateReleasedProductJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public final class TEST_CreateReleasedProductJob
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        ItemId itemId = TEST_CreateReleasedProductJob::createReleasedProduct();
+
+        info(itemId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createReleasedProduct</Name>
+				<Source><![CDATA[
+    public static ItemId createReleasedProduct(ItemId _itemId = '')
+    {
+        ItemId   itemId = _itemId;
+        RefRecId productRecId;
+
+        if (!itemId)
+        {
+            itemId = TEST_CreateReleasedProductJob::buildNewItemId();
+        }
+
+        if (InventTable::find(itemId).RecId)
+        {
+            throw Exception::Error;
+        }
+
+        ttsbegin;
+
+        productRecId = TEST_CreateReleasedProductJob::createSharedProduct(itemId);
+        TEST_CreateReleasedProductJob::ensureProductDimensionGroups(productRecId);
+        TEST_CreateReleasedProductJob::releaseProductInCurrentCompany(productRecId, itemId);
+        TEST_CreateReleasedProductJob::ensureReleasedProductCompanySetup(itemId, productRecId);
+
+        ttscommit;
+
+        return itemId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>buildNewItemId</Name>
+				<Source><![CDATA[
+    private static ItemId buildNewItemId()
+    {
+        ItemId itemId;
+        str    guidText = guid2Str(newGuid());
+
+        guidText = strRem(guidText, '-');
+        guidText = strRem(guidText, '{');
+        guidText = strRem(guidText, '}');
+
+        itemId = subStr(strFmt('TEST%1', guidText), 1, 20);
+
+        return itemId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSharedProduct</Name>
+				<Source><![CDATA[
+    private static RefRecId createSharedProduct(ItemId _itemId)
+    {
+        EcoResDistinctProduct    product;
+        EcoResProductIdentifier  identifier;
+        EcoResProductTranslation translation;
+        LanguageId               languageId = CompanyInfo::find().LanguageId;
+
+        product.clear();
+        product.initValue();
+        product.ProductType          = EcoResProductType::Item;
+        product.DisplayProductNumber = _itemId;
+        product.SearchName           = _itemId;
+
+        if (!product.validateWrite())
+        {
+            throw Exception::Error;
+        }
+
+        product.insert();
+
+        identifier.clear();
+        identifier.initValue();
+        identifier.Product       = product.RecId;
+        identifier.ProductNumber = _itemId;
+
+        if (!identifier.validateWrite())
+        {
+            throw Exception::Error;
+        }
+
+        identifier.insert();
+
+        if (!languageId)
+        {
+            languageId = 'en-us';
+        }
+
+        translation.clear();
+        translation.Product    = product.RecId;
+        translation.LanguageId = languageId;
+        translation.Name       = _itemId;
+        translation.insert();
+
+        if (languageId != 'en-us')
+        {
+            translation.clear();
+            translation.Product    = product.RecId;
+            translation.LanguageId = 'en-us';
+            translation.Name       = _itemId;
+            translation.insert();
+        }
+
+        return product.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ensureProductDimensionGroups</Name>
+				<Source><![CDATA[
+    private static void ensureProductDimensionGroups(RefRecId _productRecId)
+    {
+        EcoResStorageDimensionGroup        storageGroup = TEST_CreateReleasedProductJob::resolveStorageDimensionGroup();
+        EcoResTrackingDimensionGroup       trackingGroup = TEST_CreateReleasedProductJob::resolveTrackingDimensionGroup();
+        EcoResStorageDimensionGroupProduct storageGroupProduct;
+        EcoResTrackingDimensionGroupProduct trackingGroupProduct;
+
+        select firstonly forupdate storageGroupProduct
+            where storageGroupProduct.Product == _productRecId;
+
+        if (storageGroupProduct.RecId)
+        {
+            if (storageGroupProduct.StorageDimensionGroup != storageGroup.RecId)
+            {
+                storageGroupProduct.StorageDimensionGroup = storageGroup.RecId;
+                storageGroupProduct.update();
+            }
+        }
+        else
+        {
+            storageGroupProduct.clear();
+            storageGroupProduct.initValue();
+            storageGroupProduct.Product               = _productRecId;
+            storageGroupProduct.StorageDimensionGroup = storageGroup.RecId;
+            storageGroupProduct.insert();
+        }
+
+        select firstonly forupdate trackingGroupProduct
+            where trackingGroupProduct.Product == _productRecId;
+
+        if (trackingGroupProduct.RecId)
+        {
+            if (trackingGroupProduct.TrackingDimensionGroup != trackingGroup.RecId)
+            {
+                trackingGroupProduct.TrackingDimensionGroup = trackingGroup.RecId;
+                trackingGroupProduct.update();
+            }
+        }
+        else
+        {
+            trackingGroupProduct.clear();
+            trackingGroupProduct.initValue();
+            trackingGroupProduct.Product                = _productRecId;
+            trackingGroupProduct.TrackingDimensionGroup = trackingGroup.RecId;
+            trackingGroupProduct.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveStorageDimensionGroup</Name>
+				<Source><![CDATA[
+    private static EcoResStorageDimensionGroup resolveStorageDimensionGroup()
+    {
+        SJPMDItemMasterParam       itemMasterParam = SJPMDItemMasterParam::find();
+        EcoResStorageDimensionGroup storageGroup;
+
+        if (itemMasterParam.DefaultStorageDimensionGroupName)
+        {
+            storageGroup = EcoResStorageDimensionGroup::findByDimensionGroupName(itemMasterParam.DefaultStorageDimensionGroupName);
+        }
+
+        if (!storageGroup.RecId)
+        {
+            select firstonly storageGroup
+                where storageGroup.Name != '';
+        }
+
+        if (!storageGroup.RecId)
+        {
+            throw Exception::Error;
+        }
+
+        return storageGroup;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveTrackingDimensionGroup</Name>
+				<Source><![CDATA[
+    private static EcoResTrackingDimensionGroup resolveTrackingDimensionGroup()
+    {
+        SJPMDItemMasterParam        itemMasterParam = SJPMDItemMasterParam::find();
+        EcoResTrackingDimensionGroup trackingGroup;
+
+        if (itemMasterParam.DefaultTrackingDimensionGroupName)
+        {
+            trackingGroup = EcoResTrackingDimensionGroup::findByDimensionGroupName(itemMasterParam.DefaultTrackingDimensionGroupName);
+        }
+
+        if (!trackingGroup.RecId)
+        {
+            select firstonly trackingGroup
+                where trackingGroup.Name != '';
+        }
+
+        if (!trackingGroup.RecId)
+        {
+            throw Exception::Error;
+        }
+
+        return trackingGroup;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>releaseProductInCurrentCompany</Name>
+				<Source><![CDATA[
+    private static void releaseProductInCurrentCompany(RefRecId _productRecId, ItemId _itemId)
+    {
+        if (!InventTable::find(_itemId).RecId)
+        {
+            EcoResProductReleaseManagerBase::releaseProduct(_productRecId, CompanyInfo::find().RecId);
+        }
+
+        if (!InventTable::find(_itemId).RecId)
+        {
+            throw Exception::Error;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ensureReleasedProductCompanySetup</Name>
+				<Source><![CDATA[
+    private static void ensureReleasedProductCompanySetup(ItemId _itemId, RefRecId _productRecId)
+    {
+        TEST_CreateReleasedProductJob::ensureItemDimensionGroupLinksInCompany(_itemId, _productRecId);
+        TEST_CreateReleasedProductJob::ensureInventTableModulesInCompany(_itemId, 0);
+        TEST_CreateReleasedProductJob::ensureModelGroupInCompany(_itemId);
+        TEST_CreateReleasedProductJob::ensureItemGroupInCompany(_itemId);
+        TEST_CreateReleasedProductJob::ensureDefaultSupplyTypeInCompany(_itemId);
+        TEST_CreateReleasedProductJob::ensureItemLocationInCompany(_itemId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ensureItemDimensionGroupLinksInCompany</Name>
+				<Source><![CDATA[
+    private static void ensureItemDimensionGroupLinksInCompany(ItemId _itemId, RefRecId _productRecId)
+    {
+        EcoResStorageDimensionGroupProduct  storageGroupProduct;
+        EcoResTrackingDimensionGroupProduct trackingGroupProduct;
+        EcoResStorageDimensionGroupItem     storageGroupItem;
+        EcoResTrackingDimensionGroupItem    trackingGroupItem;
+
+        storageGroupProduct  = EcoResStorageDimensionGroupProduct::findByProduct(_productRecId);
+        trackingGroupProduct = EcoResTrackingDimensionGroupProduct::findByProduct(_productRecId);
+
+        if (storageGroupProduct.RecId)
+        {
+            select firstonly forupdate storageGroupItem
+                where storageGroupItem.ItemDataAreaId == curext()
+                   && storageGroupItem.ItemId         == _itemId;
+
+            if (storageGroupItem.RecId)
+            {
+                if (storageGroupItem.StorageDimensionGroup != storageGroupProduct.StorageDimensionGroup)
+                {
+                    storageGroupItem.StorageDimensionGroup = storageGroupProduct.StorageDimensionGroup;
+                    storageGroupItem.update();
+                }
+            }
+            else
+            {
+                storageGroupItem.clear();
+                storageGroupItem.ItemDataAreaId        = curext();
+                storageGroupItem.ItemId                = _itemId;
+                storageGroupItem.StorageDimensionGroup = storageGroupProduct.StorageDimensionGroup;
+                storageGroupItem.insert();
+            }
+        }
+
+        if (trackingGroupProduct.RecId)
+        {
+            select firstonly forupdate trackingGroupItem
+                where trackingGroupItem.ItemDataAreaId == curext()
+                   && trackingGroupItem.ItemId         == _itemId;
+
+            if (trackingGroupItem.RecId)
+            {
+                if (trackingGroupItem.TrackingDimensionGroup != trackingGroupProduct.TrackingDimensionGroup)
+                {
+                    trackingGroupItem.TrackingDimensionGroup = trackingGroupProduct.TrackingDimensionGroup;
+                    trackingGroupItem.update();
+                }
+            }
+            else
+            {
+                trackingGroupItem.clear();
+                trackingGroupItem.ItemDataAreaId         = curext();
+                trackingGroupItem.ItemId                 = _itemId;
+                trackingGroupItem.TrackingDimensionGroup = trackingGroupProduct.TrackingDimensionGroup;
+                trackingGroupItem.insert();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ensureInventTableModulesInCompany</Name>
+				<Source><![CDATA[
+    private static void ensureInventTableModulesInCompany(ItemId _itemId, real _salesPrice)
+    {
+        UnitIDBase unitIdBase = TEST_CreateReleasedProductJob::resolveDefaultUnitId();
+
+        TEST_CreateReleasedProductJob::ensureInventTableModuleInCompany(_itemId, ModuleInventPurchSales::Invent, unitIdBase, 0, false);
+        TEST_CreateReleasedProductJob::ensureInventTableModuleInCompany(_itemId, ModuleInventPurchSales::Purch,  unitIdBase, 0, false);
+        TEST_CreateReleasedProductJob::ensureInventTableModuleInCompany(_itemId, ModuleInventPurchSales::Sales,  unitIdBase, _salesPrice, true);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveDefaultUnitId</Name>
+				<Source><![CDATA[
+    private static UnitIDBase resolveDefaultUnitId()
+    {
+        SJPMDItemMasterParam itemMasterParam = SJPMDItemMasterParam::find();
+        UnitOfMeasure        unitOfMeasure;
+
+        if (itemMasterParam.DefaultUnitIDBase)
+        {
+            return itemMasterParam.DefaultUnitIDBase;
+        }
+
+        select firstonly unitOfMeasure
+            where unitOfMeasure.Symbol != '';
+
+        if (!unitOfMeasure.RecId)
+        {
+            throw Exception::Error;
+        }
+
+        return unitOfMeasure.Symbol;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ensureInventTableModuleInCompany</Name>
+				<Source><![CDATA[
+    private static void ensureInventTableModuleInCompany(
+        ItemId                 _itemId,
+        ModuleInventPurchSales _moduleType,
+        UnitIDBase             _unitIdBase,
+        real                   _price,
+        boolean                _updatePrice)
+    {
+        InventTableModule inventTableModule;
+
+        select firstonly forupdate inventTableModule
+            where inventTableModule.ItemId     == _itemId
+               && inventTableModule.ModuleType == _moduleType;
+
+        if (inventTableModule.RecId)
+        {
+            inventTableModule.UnitID = _unitIdBase;
+
+            if (_updatePrice)
+            {
+                inventTableModule.Price = _price;
+            }
+
+            inventTableModule.update();
+        }
+        else
+        {
+            inventTableModule.clear();
+            inventTableModule.initValue();
+            inventTableModule.ItemId     = _itemId;
+            inventTableModule.ModuleType = _moduleType;
+            inventTableModule.UnitID     = _unitIdBase;
+
+            if (_updatePrice)
+            {
+                inventTableModule.Price = _price;
+            }
+
+            inventTableModule.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ensureModelGroupInCompany</Name>
+				<Source><![CDATA[
+    private static void ensureModelGroupInCompany(ItemId _itemId)
+    {
+        InventModelGroupId modelGroupId = TEST_CreateReleasedProductJob::resolveDefaultModelGroupId();
+        InventModelGroupItem inventModelGroupItem;
+
+        select firstonly forupdate inventModelGroupItem
+            where inventModelGroupItem.ItemDataAreaId == curext()
+               && inventModelGroupItem.ItemId         == _itemId;
+
+        if (inventModelGroupItem.RecId)
+        {
+            if (inventModelGroupItem.ModelGroupId != modelGroupId)
+            {
+                inventModelGroupItem.ModelGroupId = modelGroupId;
+                inventModelGroupItem.update();
+            }
+        }
+        else
+        {
+            inventModelGroupItem.clear();
+            inventModelGroupItem.initValue();
+            inventModelGroupItem.ItemDataAreaId       = curext();
+            inventModelGroupItem.ItemId               = _itemId;
+            inventModelGroupItem.ModelGroupId         = modelGroupId;
+            inventModelGroupItem.ModelGroupDataAreaId = curext();
+            inventModelGroupItem.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveDefaultModelGroupId</Name>
+				<Source><![CDATA[
+    private static InventModelGroupId resolveDefaultModelGroupId()
+    {
+        SJPMDItemMasterParam itemMasterParam = SJPMDItemMasterParam::find();
+        InventModelGroup     inventModelGroup;
+
+        if (itemMasterParam.DefaultModelGroupId)
+        {
+            return itemMasterParam.DefaultModelGroupId;
+        }
+
+        select firstonly inventModelGroup
+            where inventModelGroup.ModelGroupId != '';
+
+        if (!inventModelGroup.RecId)
+        {
+            throw Exception::Error;
+        }
+
+        return inventModelGroup.ModelGroupId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ensureItemGroupInCompany</Name>
+				<Source><![CDATA[
+    private static void ensureItemGroupInCompany(ItemId _itemId)
+    {
+        ItemGroupId         itemGroupId = TEST_CreateReleasedProductJob::resolveDefaultItemGroupId();
+        InventItemGroupItem inventItemGroupItem;
+
+        select firstonly forupdate inventItemGroupItem
+            where inventItemGroupItem.ItemDataAreaId == curext()
+               && inventItemGroupItem.ItemId         == _itemId;
+
+        if (inventItemGroupItem.RecId)
+        {
+            if (inventItemGroupItem.ItemGroupId != itemGroupId)
+            {
+                inventItemGroupItem.ItemGroupId = itemGroupId;
+                inventItemGroupItem.update();
+            }
+        }
+        else
+        {
+            inventItemGroupItem.clear();
+            inventItemGroupItem.initValue();
+            inventItemGroupItem.ItemDataAreaId      = curext();
+            inventItemGroupItem.ItemId              = _itemId;
+            inventItemGroupItem.ItemGroupId         = itemGroupId;
+            inventItemGroupItem.ItemGroupDataAreaId = curext();
+            inventItemGroupItem.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveDefaultItemGroupId</Name>
+				<Source><![CDATA[
+    private static ItemGroupId resolveDefaultItemGroupId()
+    {
+        SJPMDItemMasterParam itemMasterParam = SJPMDItemMasterParam::find();
+        InventItemGroup      inventItemGroup;
+
+        if (itemMasterParam.DefaultItemGroupId)
+        {
+            return itemMasterParam.DefaultItemGroupId;
+        }
+
+        select firstonly inventItemGroup
+            where inventItemGroup.ItemGroupId != '';
+
+        if (!inventItemGroup.RecId)
+        {
+            throw Exception::Error;
+        }
+
+        return inventItemGroup.ItemGroupId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ensureDefaultSupplyTypeInCompany</Name>
+				<Source><![CDATA[
+    private static void ensureDefaultSupplyTypeInCompany(ItemId _itemId)
+    {
+        InventItemSetupSupplyType supplyType;
+
+        select firstonly supplyType
+            where supplyType.ItemDataAreaId == curext()
+               && supplyType.ItemId         == _itemId;
+
+        if (!supplyType.RecId)
+        {
+            supplyType.clear();
+            supplyType.initValue();
+            supplyType.ItemDataAreaId = curext();
+            supplyType.ItemId         = _itemId;
+            supplyType.insert();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ensureItemLocationInCompany</Name>
+				<Source><![CDATA[
+    private static void ensureItemLocationInCompany(ItemId _itemId)
+    {
+        if (!InventItemLocation::findDefault(_itemId).RecId)
+        {
+            InventItemLocation::createDefault(_itemId);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

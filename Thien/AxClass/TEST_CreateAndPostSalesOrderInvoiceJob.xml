@@ -1,0 +1,205 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_CreateAndPostSalesOrderInvoiceJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public final class TEST_CreateAndPostSalesOrderInvoiceJob
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        ItemId    itemId     = TEST_CreateReleasedProductJob::createReleasedProduct();
+        InvoiceId invoiceId;
+        SalesId   salesId;
+
+        TEST_CreateAndPostMovementJournalJob::createAndPostForItem(itemId, 100, 50);
+
+        salesId   = TEST_CreateAndPostSalesOrderInvoiceJob::createAndPostSalesInvoice(itemId, 1);
+        invoiceId = TEST_CreateAndPostSalesOrderInvoiceJob::findLatestInvoiceId(salesId);
+
+        info(itemId);
+        info(salesId);
+
+        if (invoiceId)
+        {
+            info(invoiceId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createAndPostSalesInvoice</Name>
+				<Source><![CDATA[
+    public static SalesId createAndPostSalesInvoice(ItemId _itemId, Qty _qty = 1, InventLocationId _inventLocationId = '001000')
+    {
+        CustTable customer = TEST_CreateAndPostSalesOrderInvoiceJob::resolveCustomer();
+        SalesTable salesTable;
+
+        if (!_itemId || !InventTable::find(_itemId).RecId || _qty <= 0 || !customer.RecId)
+        {
+            throw Exception::Error;
+        }
+
+        ttsbegin;
+        salesTable = TEST_CreateAndPostSalesOrderInvoiceJob::createSalesOrder(customer.AccountNum, _inventLocationId);
+        TEST_CreateAndPostSalesOrderInvoiceJob::createSalesLine(salesTable, _itemId, _qty, _inventLocationId);
+        ttscommit;
+
+        TEST_CreateAndPostSalesOrderInvoiceJob::postSalesOrderDocument(
+            salesTable,
+            DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()),
+            DocumentStatus::PackingSlip);
+
+        TEST_CreateAndPostSalesOrderInvoiceJob::postSalesOrderDocument(
+            salesTable,
+            DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone()),
+            DocumentStatus::Invoice);
+
+        return salesTable.SalesId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveCustomer</Name>
+				<Source><![CDATA[
+    private static CustTable resolveCustomer()
+    {
+        CustTable customer;
+
+        select firstonly customer
+            where customer.AccountNum != ''
+               && customer.Blocked    == CustVendorBlocked::No;
+
+        if (!customer.RecId)
+        {
+            select firstonly customer
+                where customer.AccountNum != '';
+        }
+
+        if (!customer.RecId)
+        {
+            throw Exception::Error;
+        }
+
+        return customer;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSalesOrder</Name>
+				<Source><![CDATA[
+    private static SalesTable createSalesOrder(CustAccount _custAccount, InventLocationId _inventLocationId = '001000')
+    {
+        SalesTable salesTable;
+        NumberSeq  salesIdNumSeq;
+        InventDim inventDim = TEST_RunTestDataPreparationSmokeJob::resolveDefaultInventDim(_inventLocationId);
+        salesIdNumSeq = NumberSeq::newGetNum(SalesParameters::numRefSalesId(), true);
+
+        try
+        {
+            salesTable.clear();
+            salesTable.initValue();
+            salesTable.SalesId     = salesIdNumSeq.num();
+            salesTable.CustAccount = _custAccount;
+            salesTable.initFromCustTable();
+            salesTable.LanguageId = infolog.language();
+            salesTable.InventSiteId= inventDim.InventSiteId ;
+            salesTable.InventLocationId= inventDim.InventLocationId;
+            salesTable.SalesType = SalesType::Sales;
+            salesTable.CurrencyCode = Ledger::accountingCurrency();
+
+            if (!salesTable.validateWrite())
+            {
+                throw Exception::Error;
+            }
+
+            salesTable.insert();
+            salesIdNumSeq.used();
+        }
+        catch
+        {
+            if (salesIdNumSeq)
+            {
+                salesIdNumSeq.abort();
+            }
+
+            throw Exception::Error;
+        }
+
+        return salesTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSalesLine</Name>
+				<Source><![CDATA[
+    private static void createSalesLine(SalesTable _salesTable, ItemId _itemId, Qty _qty, InventLocationId _inventLocationId = '001000')
+    {
+        SalesLine salesLine;
+        InventDim inventDim = TEST_RunTestDataPreparationSmokeJob::resolveDefaultInventDim(_inventLocationId);
+
+        if (!inventDim.InventDimId || _qty <= 0)
+        {
+            throw Exception::Error;
+        }
+
+        salesLine.clear();
+        salesLine.initFromSalesTable(_salesTable);
+        salesLine.ItemId      = _itemId;
+        salesLine.InventDimId = inventDim.InventDimId;
+        salesLine.SalesQty    = _qty;
+        salesLine.createLine(true, false, false, true, false, false);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postSalesOrderDocument</Name>
+				<Source><![CDATA[
+    private static void postSalesOrderDocument(SalesTable _salesTable, TransDate _postingDate, DocumentStatus _documentStatus)
+    {
+        SalesFormLetter formLetter = SalesFormLetter::construct(_documentStatus);
+
+        formLetter.proforma(false);
+        formLetter.transDate(_postingDate);
+
+        if (_documentStatus == DocumentStatus::PackingSlip
+         || _documentStatus == DocumentStatus::Invoice)
+        {
+            formLetter.specQty(SalesUpdate::All);
+        }
+
+        formLetter.salesTable(_salesTable);
+        formLetter.update(_salesTable);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findLatestInvoiceId</Name>
+				<Source><![CDATA[
+    private static InvoiceId findLatestInvoiceId(SalesId _salesId)
+    {
+        CustInvoiceJour custInvoiceJour;
+
+        select firstonly custInvoiceJour
+            order by RecId desc
+            where custInvoiceJour.SalesId == _salesId;
+
+        return custInvoiceJour.InvoiceId;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,271 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_AtlEntityMD31ItemMasterRow</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// ATL entity for one MD31 input row (SJPMDItemMaster), written by hand on the pattern of
+/// the generated ATL entities (AtlEntityASOHClassDefault in AtlApplicationSuite).
+/// A new row starts as Status = New, ErrorFlag = No, ProcessingGroup = 0, which is what the
+/// file import leaves behind: SJPMDInventImportStatus has no zero element (New = 1).
+/// </summary>
+public final class TEST_AtlEntityMD31ItemMasterRow extends AtlEntity
+{
+    private SJPMDItemMaster itemMaster;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    protected void new(boolean _initValue = true)
+    {
+        if (_initValue)
+        {
+            itemMaster.initValue();
+            itemMaster.Status          = SJPMDInventImportStatus::New;
+            itemMaster.ErrorFlag       = NoYes::No;
+            itemMaster.ProcessingGroup = 0;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static TEST_AtlEntityMD31ItemMasterRow construct()
+    {
+        return new TEST_AtlEntityMD31ItemMasterRow();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mainRecordBase</Name>
+				<Source><![CDATA[
+    protected Common mainRecordBase()
+    {
+        return itemMaster;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>record</Name>
+				<Source><![CDATA[
+    public SJPMDItemMaster record()
+    {
+        return itemMaster;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>save</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow save()
+    {
+        this.saveBase();
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setField</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Sets one field and returns the entity, so every fluent setter is one line.
+    /// </summary>
+    private TEST_AtlEntityMD31ItemMasterRow setField(FieldId _fieldId, anytype _value)
+    {
+        this.parmMainRecordField(_fieldId, _value, true);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setFileName</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setFileName(Filename _fileName)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, file_name), _fileName);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setExecutionId</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setExecutionId(SJPMDInventCountingExecutionId _executionId)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, ExecutionId), _executionId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCompanyCode</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setCompanyCode(SJPMDItemMasterCompanyCode _companyCode)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, crp_cd), _companyCode);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setSkuCode</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setSkuCode(SJPMDItemMasterJANCode _skuCode)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, sku_cd), _skuCode);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setNameEnglish</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setNameEnglish(SJPMDItemMasterProductNameInEnglish _name)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, sku_name_en), _name);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setNameLocal</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setNameLocal(SJPMDItemMasterProductNameInLocalLanguage _name)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, sku_name_lc), _name);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setParentJanFlag</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setParentJanFlag(SJPMDItemMasterParentJANFlag _flag)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, assort_flag), _flag);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setDepartmentCode</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setDepartmentCode(SJPMDItemMasterDepartmentCode _code)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, sku_bunrui1_cd), _code);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setProductCategory</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setProductCategory(SJPMDItemMasterProductCategory _category)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, sku_div), _category);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setSellStart</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setSellStart(SJPMDItemMasterSalesStartDate _yyyymmdd)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, sel_tm_bg), _yyyymmdd);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setSellEnd</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setSellEnd(SJPMDItemMasterSalesEndDate _yyyymmdd)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, sel_tm_en), _yyyymmdd);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCaseQuantity</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setCaseQuantity(SJPMDItemMasterCaseQuantity _qty)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, center_in_num), _qty);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCaseSize</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setCaseSize(
+        SJPMDItemMasterCaseDepth  _depth,
+        SJPMDItemMasterCaseWidth  _width,
+        SJPMDItemMasterCaseHeight _height)
+    {
+        this.setField(fieldNum(SJPMDItemMaster, oc_depth),  _depth);
+        this.setField(fieldNum(SJPMDItemMaster, oc_width),  _width);
+        return this.setField(fieldNum(SJPMDItemMaster, oc_height), _height);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCaseWeights</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setCaseWeights(
+        SJPMDItemMasterCaseNetWeight   _net,
+        SJPMDItemMasterCaseGrossWeight _gross)
+    {
+        this.setField(fieldNum(SJPMDItemMaster, oc_net_weight), _net);
+        return this.setField(fieldNum(SJPMDItemMaster, oc_gross_weight), _gross);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setPosBlockFlag</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setPosBlockFlag(SJPMDItemMasterShelfLifeControlFlag _flag)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, rel_flag), _flag);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setCountryOfOrigin</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setCountryOfOrigin(SJPMDItemMasterCountryOfOriginCode _countryRegionId)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, country_of_origin), _countryRegionId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setPrice</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setPrice(SJPMDItemMasterProductPreTaxSellingPrice _price)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, price), _price);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_AtlSpecMD31ItemMasterRow</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// ATL specification of one expected MD31 input row (SJPMDItemMaster), on the pattern of
+/// AtlSpecProductItem. Only the fields set with with... are compared.
+/// </summary>
+public final class TEST_AtlSpecMD31ItemMasterRow extends AtlSpecification
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>expectedRecordTableId</Name>
+				<Source><![CDATA[
+    protected TableId expectedRecordTableId()
+    {
+        return tableNum(SJPMDItemMaster);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static TEST_AtlSpecMD31ItemMasterRow construct()
+    {
+        return new TEST_AtlSpecMD31ItemMasterRow();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withSkuCode</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ItemMasterRow withSkuCode(SJPMDItemMasterJANCode _skuCode)
+    {
+        this.parmExpectedFieldValue(fieldNum(SJPMDItemMaster, sku_cd), _skuCode);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withStatus</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ItemMasterRow withStatus(SJPMDInventImportStatus _status)
+    {
+        this.parmExpectedFieldValue(fieldNum(SJPMDItemMaster, Status), _status);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withErrorFlag</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ItemMasterRow withErrorFlag(NoYes _errorFlag)
+    {
+        this.parmExpectedFieldValue(fieldNum(SJPMDItemMaster, ErrorFlag), _errorFlag);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

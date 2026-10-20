@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12SeedingJob05</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 test case 5 - single file, single warehouse, TWO counting dates.
+/// CountingDate is part of the journal group key, so one file and one warehouse
+/// must still split into two journal groups and two counting journals.
+/// The two journals differ only by TransDate, which is the point of the case.
+/// </summary>
+public final class TEST_MD12SeedingJob05
+{
+    #define.TestCase(5)
+    #define.FileName('TEST_MD12_TC05')
+    #define.ItemsPerDate(2)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        info(TEST_MD12SeedingJob05::seed());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seed</Name>
+				<Source><![CDATA[
+    public static str seed(SJPMDInventCountingWarehouseId _warehouseA = '',
+                           SJPMDInventCountingWarehouseId _warehouseB = '')
+    {
+        SJPMDInventCountingWarehouseId warehouseId = TEST_MD12SeedDataHelper::resolveWarehouse(1, _warehouseA);
+        SJPMDInventCountingLocationId  locationId  = TEST_MD12SeedDataHelper::resolveLocation(warehouseId);
+        SJPMDInventCountingDate        dateToday   = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
+        SJPMDInventCountingDate        dateBefore  = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet() - 1);
+        container                      items       = TEST_MD12SeedDataHelper::resolveItems(warehouseId, #ItemsPerDate);
+        ItemId                         itemId;
+        int                            idx;
+        int                            rows        = 0;
+        int                            purged;
+
+        ttsbegin;
+        purged = TEST_MD12SeedDataHelper::purgeFileName(#FileName);
+
+        for (idx = 1; idx <= conLen(items); idx++)
+        {
+            itemId = conPeek(items, idx);
+
+            TEST_MD12SeedDataHelper::insertRow(
+                #FileName, #FileName,
+                TEST_MD12SeedDataHelper::voucherNumber(#TestCase, idx),
+                dateToday, warehouseId, locationId, itemId,
+                TEST_MD12SeedDataHelper::onHandQty(itemId, warehouseId) + idx);
+
+            TEST_MD12SeedDataHelper::insertRow(
+                #FileName, #FileName,
+                TEST_MD12SeedDataHelper::voucherNumber(#TestCase, 10 + idx),
+                dateBefore, warehouseId, locationId, itemId,
+                TEST_MD12SeedDataHelper::onHandQty(itemId, warehouseId) + 20 + idx);
+
+            rows += 2;
+        }
+        ttscommit;
+
+        return strFmt('TC05 | file %1 | 2 groups (%2 / %4 and %3 / %4) | %5 rows | expect 2 journals | purged %6',
+                      #FileName, dateToday, dateBefore, warehouseId, rows, purged);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

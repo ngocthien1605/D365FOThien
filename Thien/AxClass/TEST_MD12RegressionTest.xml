@@ -1,0 +1,603 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12RegressionTest</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 regression tests. Each test seeds one case with the matching
+/// TEST_MD12SeedingJob0n class, runs SJPMDInventCountingBatchService.processGroup
+/// for the seeded file - the call one batch task makes - and asserts on the staging,
+/// archive and counting-journal tables.
+///
+/// Everything a test writes, including the posted counting journals, is rolled back
+/// afterwards (TestTransactionMode::AutoRollback). Run from Visual Studio Test Explorer.
+///
+/// Not covered: the batch job itself, the split into processing groups across threads
+/// (SJPMDInventCountingService.assignProcessingGroups is private), and the summary email.
+/// </summary>
+[SysTestTarget(classStr(SJPMDInventCountingBatchService), UtilElementType::Class)]
+[SysTestTransaction(TestTransactionMode::AutoRollback)]
+[SysTestCaseDataDependency('DMG')]
+public final class TEST_MD12RegressionTest extends SysTestCase
+{
+    // Tracking values; the same file names as in TEST_MD12SeedingJob01-08.
+    #define.FileTC01('TEST_MD12_TC01')
+    #define.FileTC02('TEST_MD12_TC02')
+    #define.FileTC03('TEST_MD12_TC03')
+    #define.FileTC04('TEST_MD12_TC04')
+    #define.FileTC05('TEST_MD12_TC05')
+    #define.FileTC06A('TEST_MD12_TC06_A')
+    #define.FileTC06B('TEST_MD12_TC06_B')
+    #define.FileTC07A('TEST_MD12_TC07_A')
+    #define.FileTC07B('TEST_MD12_TC07_B')
+    #define.FileTC08('TEST_MD12_TC08')
+    #define.FileTC09('TEST_MD12_TC09')
+    #define.FileTC10('TEST_MD12_TC10')
+
+    // Seeded rows go into processing group 0 until the orchestrator assigns them.
+    #define.UnassignedGroup(0)
+
+    // Archived rows per file name before the worker ran. The seeding jobs purge
+    // staging only, so archive rows from earlier manual runs of the same file remain.
+    Map archivedBefore;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setUp</Name>
+				<Source><![CDATA[
+    public void setUp()
+    {
+        super();
+
+        archivedBefore = new Map(Types::String, Types::Int64);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc01_oneRow_oneJournalWithOneLinePosted</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC01: one row, one journal group - one posted counting journal with one line.
+    /// </summary>
+    [SysTestMethod]
+    public void tc01_oneRow_oneJournalWithOneLinePosted()
+    {
+        TEST_MD12SeedingJob01::seed();
+        int64 seeded    = this.stagingRows(#FileTC01, SJPMDInventCountingStatus::New);
+        RecId watermark = this.journalWatermark();
+
+        this.process(#FileTC01);
+
+        this.assertFileCompleted(#FileTC01, seeded);
+        this.assertJournals(watermark, 1);
+        this.assertLines(watermark, 1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc02_threeItems_oneJournalWithThreeLines</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC02: three items in one journal group - one journal with one line per item.
+    /// </summary>
+    [SysTestMethod]
+    public void tc02_threeItems_oneJournalWithThreeLines()
+    {
+        TEST_MD12SeedingJob02::seed();
+        int64 seeded    = this.stagingRows(#FileTC02, SJPMDInventCountingStatus::New);
+        RecId watermark = this.journalWatermark();
+
+        this.process(#FileTC02);
+
+        this.assertFileCompleted(#FileTC02, seeded);
+        this.assertJournals(watermark, 1);
+        this.assertLines(watermark, 3);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc03_sameItemThreeVouchers_oneLineWithSummedCount</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC03: the same item on three vouchers in one group - one line, Counted = 4 + 5 + 6.
+    /// </summary>
+    [SysTestMethod]
+    public void tc03_sameItemThreeVouchers_oneLineWithSummedCount()
+    {
+        InventJournalTrans trans;
+
+        TEST_MD12SeedingJob03::seed();
+        int64 seeded    = this.stagingRows(#FileTC03, SJPMDInventCountingStatus::New);
+        RecId watermark = this.journalWatermark();
+
+        this.process(#FileTC03);
+
+        this.assertFileCompleted(#FileTC03, seeded);
+        this.assertJournals(watermark, 1);
+        this.assertLines(watermark, 1);
+
+        trans = this.firstNewLine(watermark);
+        this.assertTrue(trans.Counted == 15, strFmt('The three quantities 4 + 5 + 6 must be summed into Counted = 15, found %1', trans.Counted));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc04_twoWarehouses_twoJournals</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC04: one file and date, two warehouses - two journal groups, two journals.
+    /// </summary>
+    [SysTestMethod]
+    public void tc04_twoWarehouses_twoJournals()
+    {
+        TEST_MD12SeedingJob04::seed();
+        int64 seeded    = this.stagingRows(#FileTC04, SJPMDInventCountingStatus::New);
+        RecId watermark = this.journalWatermark();
+
+        this.process(#FileTC04);
+
+        this.assertFileCompleted(#FileTC04, seeded);
+        this.assertJournals(watermark, 2);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc05_twoCountingDates_twoJournalsWithDifferentDates</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC05: one file and warehouse, two counting dates - two journals whose lines
+    /// carry different transaction dates.
+    /// </summary>
+    [SysTestMethod]
+    public void tc05_twoCountingDates_twoJournalsWithDifferentDates()
+    {
+        InventJournalTable journalTable;
+        InventJournalTrans trans;
+        TransDate          earliest;
+        TransDate          latest;
+
+        TEST_MD12SeedingJob05::seed();
+        int64               seeded        = this.stagingRows(#FileTC05, SJPMDInventCountingStatus::New);
+        RecId               watermark     = this.journalWatermark();
+        InventJournalNameId journalNameId = this.journalNameId();
+
+        this.process(#FileTC05);
+
+        this.assertFileCompleted(#FileTC05, seeded);
+        this.assertJournals(watermark, 2);
+
+        select minof(TransDate) from trans
+            exists join journalTable
+                where journalTable.JournalId     == trans.JournalId
+                   && journalTable.RecId         >  watermark
+                   && journalTable.JournalNameId == journalNameId;
+        earliest = trans.TransDate;
+
+        select maxof(TransDate) from trans
+            exists join journalTable
+                where journalTable.JournalId     == trans.JournalId
+                   && journalTable.RecId         >  watermark
+                   && journalTable.JournalNameId == journalNameId;
+        latest = trans.TransDate;
+
+        this.assertTrue(earliest != latest, strFmt('The two journals must have different dates, both lines are dated %1', latest));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc06_twoFilesSameGroupKey_twoJournals</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC06: two files with the same warehouse and date - the file name keeps them
+    /// apart, so two journals.
+    /// </summary>
+    [SysTestMethod]
+    public void tc06_twoFilesSameGroupKey_twoJournals()
+    {
+        TEST_MD12SeedingJob06::seed();
+        int64 seededA   = this.stagingRows(#FileTC06A, SJPMDInventCountingStatus::New);
+        int64 seededB   = this.stagingRows(#FileTC06B, SJPMDInventCountingStatus::New);
+        RecId watermark = this.journalWatermark();
+
+        this.process(#FileTC06A);
+        this.process(#FileTC06B);
+
+        this.assertFileCompleted(#FileTC06A, seededA);
+        this.assertFileCompleted(#FileTC06B, seededB);
+        this.assertJournals(watermark, 2);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc06_fileFilter_otherFileStaysNew</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC06 with the file filter: processing file A only must leave file B untouched.
+    /// </summary>
+    [SysTestMethod]
+    public void tc06_fileFilter_otherFileStaysNew()
+    {
+        TEST_MD12SeedingJob06::seed();
+        int64 seededA   = this.stagingRows(#FileTC06A, SJPMDInventCountingStatus::New);
+        int64 seededB   = this.stagingRows(#FileTC06B, SJPMDInventCountingStatus::New);
+        RecId watermark = this.journalWatermark();
+
+        this.process(#FileTC06A);
+
+        this.assertFileCompleted(#FileTC06A, seededA);
+        this.assertTrue(this.stagingRows(#FileTC06B, SJPMDInventCountingStatus::New) == seededB,
+            strFmt('File %1 was not selected and must still have its %2 rows at New', #FileTC06B, seededB));
+        this.assertJournals(watermark, 1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc07_twoFilesTwoWarehouses_fourJournals</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC07: two files x two warehouses - four journal groups, four journals.
+    /// </summary>
+    [SysTestMethod]
+    public void tc07_twoFilesTwoWarehouses_fourJournals()
+    {
+        TEST_MD12SeedingJob07::seed();
+        int64 seededA   = this.stagingRows(#FileTC07A, SJPMDInventCountingStatus::New);
+        int64 seededB   = this.stagingRows(#FileTC07B, SJPMDInventCountingStatus::New);
+        RecId watermark = this.journalWatermark();
+
+        this.process(#FileTC07A);
+        this.process(#FileTC07B);
+
+        this.assertFileCompleted(#FileTC07A, seededA);
+        this.assertFileCompleted(#FileTC07B, seededB);
+        this.assertJournals(watermark, 4);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc07_fileFilter_onlyThatFilesTwoGroups</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC07 with the file filter: file A has two of the four groups, so two journals,
+    /// and file B stays at New.
+    /// </summary>
+    [SysTestMethod]
+    public void tc07_fileFilter_onlyThatFilesTwoGroups()
+    {
+        TEST_MD12SeedingJob07::seed();
+        int64 seededA   = this.stagingRows(#FileTC07A, SJPMDInventCountingStatus::New);
+        int64 seededB   = this.stagingRows(#FileTC07B, SJPMDInventCountingStatus::New);
+        RecId watermark = this.journalWatermark();
+
+        this.process(#FileTC07A);
+
+        this.assertFileCompleted(#FileTC07A, seededA);
+        this.assertTrue(this.stagingRows(#FileTC07B, SJPMDInventCountingStatus::New) == seededB,
+            strFmt('File %1 was not selected and must still have its %2 rows at New', #FileTC07B, seededB));
+        this.assertJournals(watermark, 2);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc08_countBelowOnHand_negativeQuantity</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC08: counted 3 below on-hand - the journal line carries Qty = -3.
+    /// </summary>
+    [SysTestMethod]
+    public void tc08_countBelowOnHand_negativeQuantity()
+    {
+        InventJournalTrans trans;
+
+        TEST_MD12SeedingJob08::seed();
+        int64 seeded    = this.stagingRows(#FileTC08, SJPMDInventCountingStatus::New);
+        RecId watermark = this.journalWatermark();
+
+        this.process(#FileTC08);
+
+        this.assertFileCompleted(#FileTC08, seeded);
+        this.assertJournals(watermark, 1);
+        this.assertLines(watermark, 1);
+
+        trans = this.firstNewLine(watermark);
+        this.assertTrue(trans.Qty == -3, strFmt('Counted is 3 below on-hand, so Qty must be -3, found %1 (Counted %2, on-hand %3)',
+                                                trans.Qty, trans.Counted, trans.InventOnHand));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc09_badGroup_isolatedAndGoodGroupPosted</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC09: one file with a good group (today) and a group with an unknown item
+    /// (yesterday). The bad group must end in Error with its flag and a message, and
+    /// the good group must still be posted and archived.
+    /// </summary>
+    [SysTestMethod]
+    public void tc09_badGroup_isolatedAndGoodGroupPosted()
+    {
+        SJPMDInventCountingAddOn addOn;
+        SJPMDInventCountingDate  goodDate = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
+        SJPMDInventCountingDate  badDate  = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet() - 1);
+
+        TEST_MD12SeedingJob09::seed();
+        int64 seededGood = this.stagingRowsOnDate(#FileTC09, goodDate);
+        int64 seededBad  = this.stagingRowsOnDate(#FileTC09, badDate);
+        RecId watermark  = this.journalWatermark();
+
+        this.process(#FileTC09);
+
+        this.assertTrue(seededGood > 0 && seededBad > 0, 'The seeding job must have inserted a good and a bad group');
+
+        this.assertTrue(this.newArchivedRows(#FileTC09) == seededGood,
+            strFmt('The good group must be archived: expected %1 new rows, found %2', seededGood, this.newArchivedRows(#FileTC09)));
+
+        select count(RecId) from addOn
+            where addOn.FileName     == #FileTC09
+               && addOn.CountingDate == badDate
+               && addOn.Status       == SJPMDInventCountingStatus::Error
+               && addOn.ErrorFlag    == NoYes::Yes;
+        this.assertTrue(addOn.RecId == seededBad,
+            strFmt('All %1 rows of the bad group must be in Error with the flag set, found %2', seededBad, addOn.RecId));
+
+        select firstonly ErrorMessage from addOn
+            where addOn.FileName     == #FileTC09
+               && addOn.CountingDate == badDate;
+        this.assertTrue(addOn.ErrorMessage != '', 'The bad group must carry an error message');
+
+        this.assertTrue(this.stagingRows(#FileTC09, SJPMDInventCountingStatus::New) == 0, 'No row may be left at New');
+        this.assertJournals(watermark, 1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc10_eightGroups_eightJournals</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC10: eight journal groups in one file (eight counting dates) - eight journals.
+    /// The case's other purpose, spreading the groups over threads, is done by the
+    /// private SJPMDInventCountingService.assignProcessingGroups and is not covered here.
+    /// </summary>
+    [SysTestMethod]
+    public void tc10_eightGroups_eightJournals()
+    {
+        TEST_MD12SeedingJob10::seed();
+        int64 seeded    = this.stagingRows(#FileTC10, SJPMDInventCountingStatus::New);
+        RecId watermark = this.journalWatermark();
+
+        this.process(#FileTC10);
+
+        this.assertFileCompleted(#FileTC10, seeded);
+        this.assertJournals(watermark, 8);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>stagingRowsOnDate</Name>
+				<Source><![CDATA[
+    private int64 stagingRowsOnDate(SJPMDInventCountingFileName _fileName, SJPMDInventCountingDate _countingDate)
+    {
+        SJPMDInventCountingAddOn addOn;
+
+        select count(RecId) from addOn
+            where addOn.FileName     == _fileName
+               && addOn.CountingDate == _countingDate
+               && addOn.Status       == SJPMDInventCountingStatus::New;
+
+        return addOn.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>process</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Runs the per-group worker for one seeded file, as one batch task would.
+    /// Records the file's archive count first, so newArchivedRows sees only this run.
+    /// </summary>
+    private void process(SJPMDInventCountingFileName _fileName)
+    {
+        SJPMDInventCountingBatchService service = new SJPMDInventCountingBatchService();
+
+        archivedBefore.insert(_fileName, this.archivedRows(_fileName));
+
+        service.processGroup(#UnassignedGroup, _fileName);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertFileCompleted</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// A file is completed when none of its rows is in Error or still New, and every
+    /// seeded row has been moved to the archive as Completed.
+    /// </summary>
+    private void assertFileCompleted(SJPMDInventCountingFileName _fileName, int64 _seededRows)
+    {
+        SJPMDInventCountingAddOn errorRow;
+
+        this.assertTrue(_seededRows > 0, strFmt('The seeding job must have inserted rows for %1', _fileName));
+
+        select firstonly ErrorMessage from errorRow
+            where errorRow.FileName == _fileName
+               && errorRow.Status   == SJPMDInventCountingStatus::Error;
+        this.assertTrue(errorRow.RecId == 0, strFmt('File %1: no row may end in Error. First error: %2', _fileName, errorRow.ErrorMessage));
+
+        this.assertTrue(this.stagingRows(_fileName, SJPMDInventCountingStatus::New) == 0,
+            strFmt('File %1: no row may be left at New', _fileName));
+
+        this.assertTrue(this.newArchivedRows(_fileName) == _seededRows,
+            strFmt('File %1: expected %2 newly archived rows, found %3', _fileName, _seededRows, this.newArchivedRows(_fileName)));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertJournals</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Exactly _expected counting journals were created since the watermark, and all are posted.
+    /// </summary>
+    private void assertJournals(RecId _watermark, int _expected)
+    {
+        InventJournalTable  journalTable;
+        InventJournalNameId journalNameId = this.journalNameId();
+
+        select count(RecId) from journalTable
+            where journalTable.RecId         >  _watermark
+               && journalTable.JournalNameId == journalNameId;
+        this.assertTrue(journalTable.RecId == _expected,
+            strFmt('Expected %1 new counting journal(s) of journal name %2, found %3', _expected, journalNameId, journalTable.RecId));
+
+        select count(RecId) from journalTable
+            where journalTable.RecId         >  _watermark
+               && journalTable.JournalNameId == journalNameId
+               && journalTable.Posted        == NoYes::No;
+        this.assertTrue(journalTable.RecId == 0, strFmt('%1 new counting journal(s) are not posted', journalTable.RecId));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertLines</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The counting journals created since the watermark hold _expected lines in total.
+    /// </summary>
+    private void assertLines(RecId _watermark, int _expected)
+    {
+        InventJournalTrans  trans;
+        InventJournalTable  journalTable;
+        InventJournalNameId journalNameId = this.journalNameId();
+
+        select count(RecId) from trans
+            exists join journalTable
+                where journalTable.JournalId     == trans.JournalId
+                   && journalTable.RecId         >  _watermark
+                   && journalTable.JournalNameId == journalNameId;
+        this.assertTrue(trans.RecId == _expected, strFmt('Expected %1 journal line(s), found %2', _expected, trans.RecId));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>firstNewLine</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The first line of the counting journals created since the watermark.
+    /// </summary>
+    private InventJournalTrans firstNewLine(RecId _watermark)
+    {
+        InventJournalTrans  trans;
+        InventJournalTable  journalTable;
+        InventJournalNameId journalNameId = this.journalNameId();
+
+        select firstonly trans
+            order by LineNum
+            exists join journalTable
+                where journalTable.JournalId     == trans.JournalId
+                   && journalTable.RecId         >  _watermark
+                   && journalTable.JournalNameId == journalNameId;
+
+        return trans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>journalWatermark</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The highest counting-journal RecId before the worker runs. Journals created
+    /// by the test have a higher RecId; earlier manual runs of the same seeds do not.
+    /// </summary>
+    private RecId journalWatermark()
+    {
+        InventJournalTable journalTable;
+
+        select maxof(RecId) from journalTable;
+
+        return journalTable.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>journalNameId</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The journal name MD12 creates its counting journals with.
+    /// </summary>
+    private InventJournalNameId journalNameId()
+    {
+        return SJPMDInventCountingParam::find().JournalNameId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>stagingRows</Name>
+				<Source><![CDATA[
+    private int64 stagingRows(SJPMDInventCountingFileName _fileName, SJPMDInventCountingStatus _status)
+    {
+        SJPMDInventCountingAddOn addOn;
+
+        select count(RecId) from addOn
+            where addOn.FileName == _fileName
+               && addOn.Status   == _status;
+
+        return addOn.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>archivedRows</Name>
+				<Source><![CDATA[
+    private int64 archivedRows(SJPMDInventCountingFileName _fileName)
+    {
+        SJPMDInventCountingArchive archive;
+
+        select count(RecId) from archive
+            where archive.FileName == _fileName
+               && archive.Status   == SJPMDInventCountingStatus::Completed;
+
+        return archive.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newArchivedRows</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Completed archive rows of the file added since process() ran for it.
+    /// </summary>
+    private int64 newArchivedRows(SJPMDInventCountingFileName _fileName)
+    {
+        int64 before = archivedBefore.exists(_fileName) ? archivedBefore.lookup(_fileName) : 0;
+
+        return this.archivedRows(_fileName) - before;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

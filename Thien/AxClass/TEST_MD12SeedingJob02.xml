@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12SeedingJob02</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 test case 2 - single file, single warehouse, single date, three distinct items.
+/// Still one journal group, so the batch must produce one counting journal
+/// carrying three lines (one per item).
+/// </summary>
+public final class TEST_MD12SeedingJob02
+{
+    #define.TestCase(2)
+    #define.FileName('TEST_MD12_TC02')
+    #define.ItemCount(3)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        info(TEST_MD12SeedingJob02::seed());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seed</Name>
+				<Source><![CDATA[
+    public static str seed(SJPMDInventCountingWarehouseId _warehouseA = '',
+                           SJPMDInventCountingWarehouseId _warehouseB = '')
+    {
+        SJPMDInventCountingWarehouseId warehouseId  = TEST_MD12SeedDataHelper::resolveWarehouse(1, _warehouseA);
+        SJPMDInventCountingLocationId  locationId   = TEST_MD12SeedDataHelper::resolveLocation(warehouseId);
+        SJPMDInventCountingDate        countingDate = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
+        container                      items        = TEST_MD12SeedDataHelper::resolveItems(warehouseId, #ItemCount);
+        ItemId                         itemId;
+        str                            itemList     = '';
+        int                            idx;
+        int                            purged;
+
+        ttsbegin;
+        purged = TEST_MD12SeedDataHelper::purgeFileName(#FileName);
+
+        for (idx = 1; idx <= conLen(items); idx++)
+        {
+            itemId = conPeek(items, idx);
+
+            TEST_MD12SeedDataHelper::insertRow(
+                #FileName,
+                #FileName,
+                TEST_MD12SeedDataHelper::voucherNumber(#TestCase, idx),
+                countingDate,
+                warehouseId,
+                locationId,
+                itemId,
+                TEST_MD12SeedDataHelper::onHandQty(itemId, warehouseId) + idx);
+
+            itemList += (itemList ? ', ' : '') + itemId;
+        }
+        ttscommit;
+
+        return strFmt('TC02 | file %1 | 1 group (%2 / %3) | %4 rows | items %5 | purged %6',
+                      #FileName, countingDate, warehouseId, conLen(items), itemList, purged);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

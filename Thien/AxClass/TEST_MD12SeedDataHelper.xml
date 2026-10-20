@@ -1,0 +1,288 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12SeedDataHelper</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 - shared seeding helpers for the TEST_MD12SeedingJob* classes.
+/// Resolves real master data, purges a previous seed by FileName, and inserts
+/// SJPMDInventCountingAddOn staging rows.
+///
+/// Seeding only. Batch execution and journal verification are done by hand.
+/// </summary>
+public final class TEST_MD12SeedDataHelper
+{
+    #define.FallbackLocationId('TESTLOC')
+    #define.CountryCode('JP')
+    #define.VoucherType(1)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>resolveWarehouse</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns the _ordinal'th warehouse on the site configured in SJPMDInventCountingParam.
+    /// The site filter matters: SJPMDInventCountingBatchService::createJournal takes
+    /// InventSiteId from the parameters record and InventLocationId from the staging row,
+    /// so a warehouse from another site produces an inconsistent InventDim.
+    /// _override wins when supplied (the form's Warehouse A / Warehouse B fields).
+    /// Warehouses whose ID is longer than SJPMDInventCountingWarehouseId (6 characters,
+    /// InventLocationId has 10) are skipped: the staging field would cut them to their
+    /// first 6 characters, so two of them can resolve to the same, possibly unrelated, ID.
+    /// </summary>
+    public static SJPMDInventCountingWarehouseId resolveWarehouse(
+        int                            _ordinal,
+        SJPMDInventCountingWarehouseId _override = '')
+    {
+        InventLocation           inventLocation;
+        SJPMDInventCountingParam parameters = SJPMDInventCountingParam::find();
+        InventSiteId             siteId     = parameters.InventSiteId;
+        int                      maxLength  = new DictType(extendedTypeNum(SJPMDInventCountingWarehouseId)).stringLen();
+        int                      seen       = 0;
+
+        if (_override)
+        {
+            if (!InventLocation::find(_override).RecId)
+            {
+                throw error(strFmt('TEST_MD12: warehouse %1 does not exist.', _override));
+            }
+
+            return _override;
+        }
+
+        if (!siteId)
+        {
+            throw error('TEST_MD12: InventSiteId is not configured in SJPMDInventCountingParam. Set it, or type a warehouse into the form.');
+        }
+
+        while select InventLocationId from inventLocation
+            order by InventLocationId
+            where inventLocation.InventSiteId == siteId
+        {
+            if (strLen(inventLocation.InventLocationId) > maxLength)
+            {
+                continue;
+            }
+
+            seen++;
+
+            if (seen == _ordinal)
+            {
+                return inventLocation.InventLocationId;
+            }
+        }
+
+        throw error(strFmt('TEST_MD12: site %1 has fewer than %2 warehouse(s) with an ID of at most %3 characters. This test case needs %2 - type them into the form instead.',
+                           siteId, _ordinal, maxLength));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveLocation</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// LocationId is mandatory on the staging table but MD12 never reads it -
+    /// it is part of neither the journal group key nor the journal line.
+    /// Any non-blank value is enough.
+    /// </summary>
+    public static SJPMDInventCountingLocationId resolveLocation(SJPMDInventCountingWarehouseId _warehouseId)
+    {
+        InventLocation inventLocation = InventLocation::find(_warehouseId);
+
+        return inventLocation.WMSLocationIdDefaultReceipt
+             ? inventLocation.WMSLocationIdDefaultReceipt
+             : #FallbackLocationId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveItems</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns a container of _count real ItemIds, preferring items that already have
+    /// physical on-hand in _warehouseId so the counting variance is meaningful.
+    /// Falls back to any ItemType::Item when the warehouse is empty.
+    /// </summary>
+    public static container resolveItems(SJPMDInventCountingWarehouseId _warehouseId, int _count)
+    {
+        InventSum   inventSum;
+        InventDim   inventDim;
+        InventTable inventTable;
+        container   items;
+
+        while select ItemId from inventSum
+            group by inventSum.ItemId
+            order by inventSum.ItemId
+            where inventSum.PhysicalInvent > 0
+            join inventDim
+                where inventDim.InventDimId       == inventSum.InventDimId
+                   && inventDim.InventLocationId  == _warehouseId
+        {
+            items += [inventSum.ItemId];
+
+            if (conLen(items) >= _count)
+            {
+                return items;
+            }
+        }
+
+        while select ItemId from inventTable
+            order by ItemId
+            where inventTable.ItemType == ItemType::Item
+        {
+            if (!conFind(items, inventTable.ItemId))
+            {
+                items += [inventTable.ItemId];
+            }
+
+            if (conLen(items) >= _count)
+            {
+                return items;
+            }
+        }
+
+        throw error(strFmt('TEST_MD12: could not resolve %1 item(s) for warehouse %2.', _count, _warehouseId));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>onHandQty</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Physical on-hand for _itemId in _warehouseId, summed across all other dimensions.
+    /// Used to derive a Counted quantity that yields a known variance.
+    /// </summary>
+    public static real onHandQty(ItemId _itemId, SJPMDInventCountingWarehouseId _warehouseId)
+    {
+        InventSum inventSum;
+        InventDim inventDim;
+        real      qty = 0;
+
+        while select PhysicalInvent from inventSum
+            where inventSum.ItemId == _itemId
+            join inventDim
+                where inventDim.InventDimId      == inventSum.InventDimId
+                   && inventDim.InventLocationId == _warehouseId
+        {
+            qty += inventSum.PhysicalInvent;
+        }
+
+        return qty;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>dateToYYYYMMDD</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Formats a date as the 8-character YYYYMMDD string MD12 expects.
+    /// SJPMDInventCountingDate has StringSize 8, so anything longer is truncated.
+    /// </summary>
+    public static SJPMDInventCountingDate dateToYYYYMMDD(date _date)
+    {
+        return int2Str(year(_date))
+             + strRFix(int2Str(mthOfYr(_date)), 2, '0')
+             + strRFix(int2Str(dayOfMth(_date)), 2, '0');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>purgeFileName</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Deletes every staging row carrying _fileName so a seeding job is idempotent.
+    /// Only touches SJPMDInventCountingAddOn rows this test harness created - the
+    /// FileName values are all TEST_MD12_* - and never the archive table.
+    /// Returns the number of rows removed.
+    /// </summary>
+    public static int purgeFileName(SJPMDInventCountingFileName _fileName)
+    {
+        SJPMDInventCountingAddOn addOn;
+        int                      removed = 0;
+
+        if (!_fileName)
+        {
+            throw Exception::Error;
+        }
+
+        select count(RecId) from addOn
+            where addOn.FileName == _fileName;
+
+        removed = addOn.RecId;
+
+        delete_from addOn
+            where addOn.FileName == _fileName;
+
+        return removed;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertRow</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Inserts one SJPMDInventCountingAddOn staging row.
+    /// Status is set explicitly: SJPMDInventCountingStatus has no zero element
+    /// (New = 1), so a row left at the default is invisible to the batch.
+    /// PKIdx is unique on FileName + ExecutionId + VoucherNumber + WarehouseId
+    /// + LocationId + ItemId, so callers must vary at least one of those per row.
+    /// </summary>
+    public static void insertRow(
+        SJPMDInventCountingFileName      _fileName,
+        SJPMDInventCountingExecutionId   _executionId,
+        SJPMDInventCountingVoucherNumber _voucherNumber,
+        SJPMDInventCountingDate          _countingDate,
+        SJPMDInventCountingWarehouseId   _warehouseId,
+        SJPMDInventCountingLocationId    _locationId,
+        ItemId                           _itemId,
+        Qty                              _quantity,
+        SJPMDInventCountingCompanyCode   _companyCode = curext())
+    {
+        SJPMDInventCountingAddOn addOn;
+
+        addOn.clear();
+        addOn.FileName        = _fileName;
+        addOn.ExecutionId     = _executionId;
+        addOn.VoucherNumber   = _voucherNumber;
+        addOn.VoucherType     = #VoucherType;
+        addOn.CountingDate    = _countingDate;
+        addOn.WarehouseId     = _warehouseId;
+        addOn.LocationId      = _locationId;
+        addOn.ItemId          = _itemId;
+        addOn.Quantity        = _quantity;
+        addOn.CompanyCode     = _companyCode;
+        addOn.CountryCode     = #CountryCode;
+        addOn.Status          = SJPMDInventCountingStatus::New;
+        addOn.ErrorFlag       = NoYes::No;
+        addOn.ErrorMessage    = '';
+        addOn.ProcessingGroup = 0;
+        addOn.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>voucherNumber</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Builds a voucher number that fits SJPMDInventCountingVoucherNumber (StringSize 10),
+    /// e.g. testCase 1, sequence 3 -> 'T01V003'.
+    /// </summary>
+    public static SJPMDInventCountingVoucherNumber voucherNumber(int _testCase, int _sequence)
+    {
+        return 'T' + strRFix(int2Str(_testCase), 2, '0')
+             + 'V' + strRFix(int2Str(_sequence), 3, '0');
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

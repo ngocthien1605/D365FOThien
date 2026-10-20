@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12SeedingJob04</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 test case 4 - single file, single date, TWO warehouses.
+/// WarehouseId is part of the journal group key, so one file must split into
+/// two journal groups and therefore two separate counting journals.
+/// Requires two warehouses on the configured site; type them into the form
+/// (Warehouse A / Warehouse B) if auto-resolution cannot find two.
+/// </summary>
+public final class TEST_MD12SeedingJob04
+{
+    #define.TestCase(4)
+    #define.FileName('TEST_MD12_TC04')
+    #define.ItemsPerWarehouse(2)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        info(TEST_MD12SeedingJob04::seed());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seed</Name>
+				<Source><![CDATA[
+    public static str seed(SJPMDInventCountingWarehouseId _warehouseA = '',
+                           SJPMDInventCountingWarehouseId _warehouseB = '')
+    {
+        SJPMDInventCountingWarehouseId warehouseA   = TEST_MD12SeedDataHelper::resolveWarehouse(1, _warehouseA);
+        SJPMDInventCountingWarehouseId warehouseB   = TEST_MD12SeedDataHelper::resolveWarehouse(2, _warehouseB);
+        SJPMDInventCountingDate        countingDate = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
+        int                            rows         = 0;
+        int                            purged;
+
+        if (warehouseA == warehouseB)
+        {
+            throw error(strFmt('TEST_MD12: TC04 needs two DIFFERENT warehouses, both resolved to %1.', warehouseA));
+        }
+
+        ttsbegin;
+        purged = TEST_MD12SeedDataHelper::purgeFileName(#FileName);
+
+        rows += TEST_MD12SeedingJob04::seedWarehouse(warehouseA, countingDate, 1);
+        rows += TEST_MD12SeedingJob04::seedWarehouse(warehouseB, countingDate, 10);
+        ttscommit;
+
+        return strFmt('TC04 | file %1 | 2 groups (%2 / %3 and %2 / %4) | %5 rows | expect 2 journals | purged %6',
+                      #FileName, countingDate, warehouseA, warehouseB, rows, purged);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seedWarehouse</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Seeds one warehouse's journal group. _voucherSeed keeps voucher numbers
+    /// distinct between the two groups so they stay easy to read in the staging list.
+    /// </summary>
+    private static int seedWarehouse(SJPMDInventCountingWarehouseId _warehouseId,
+                                     SJPMDInventCountingDate        _countingDate,
+                                     int                            _voucherSeed)
+    {
+        SJPMDInventCountingLocationId locationId = TEST_MD12SeedDataHelper::resolveLocation(_warehouseId);
+        container                     items      = TEST_MD12SeedDataHelper::resolveItems(_warehouseId, #ItemsPerWarehouse);
+        ItemId                        itemId;
+        int                           idx;
+
+        for (idx = 1; idx <= conLen(items); idx++)
+        {
+            itemId = conPeek(items, idx);
+
+            TEST_MD12SeedDataHelper::insertRow(
+                #FileName,
+                #FileName,
+                TEST_MD12SeedDataHelper::voucherNumber(#TestCase, _voucherSeed + idx),
+                _countingDate,
+                _warehouseId,
+                locationId,
+                itemId,
+                TEST_MD12SeedDataHelper::onHandQty(itemId, _warehouseId) + idx);
+        }
+
+        return conLen(items);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

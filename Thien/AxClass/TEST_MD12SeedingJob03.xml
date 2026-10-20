@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12SeedingJob03</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 test case 3 - quantity aggregation.
+/// Seeds the SAME item on three different vouchers inside one journal group.
+/// SJPMDInventCountingBatchService::createJournal sums by ItemId into a Map,
+/// so the batch must produce one journal with ONE line whose Counted is the
+/// sum of the three seeded quantities (4 + 5 + 6 = 15).
+/// </summary>
+public final class TEST_MD12SeedingJob03
+{
+    #define.TestCase(3)
+    #define.FileName('TEST_MD12_TC03')
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        info(TEST_MD12SeedingJob03::seed());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seed</Name>
+				<Source><![CDATA[
+    public static str seed(SJPMDInventCountingWarehouseId _warehouseA = '',
+                           SJPMDInventCountingWarehouseId _warehouseB = '')
+    {
+        SJPMDInventCountingWarehouseId warehouseId  = TEST_MD12SeedDataHelper::resolveWarehouse(1, _warehouseA);
+        SJPMDInventCountingLocationId  locationId   = TEST_MD12SeedDataHelper::resolveLocation(warehouseId);
+        SJPMDInventCountingDate        countingDate = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
+        container                      items        = TEST_MD12SeedDataHelper::resolveItems(warehouseId, 1);
+        ItemId                         itemId       = conPeek(items, 1);
+        container                      quantities   = [4, 5, 6];
+        real                           expectedSum  = 0;
+        int                            idx;
+        int                            purged;
+
+        ttsbegin;
+        purged = TEST_MD12SeedDataHelper::purgeFileName(#FileName);
+
+        for (idx = 1; idx <= conLen(quantities); idx++)
+        {
+            // Same item, same group - only VoucherNumber varies, which is what
+            // keeps the unique PKIdx satisfied.
+            TEST_MD12SeedDataHelper::insertRow(
+                #FileName,
+                #FileName,
+                TEST_MD12SeedDataHelper::voucherNumber(#TestCase, idx),
+                countingDate,
+                warehouseId,
+                locationId,
+                itemId,
+                conPeek(quantities, idx));
+
+            expectedSum += conPeek(quantities, idx);
+        }
+        ttscommit;
+
+        return strFmt('TC03 | file %1 | 1 group (%2 / %3) | 3 rows, 1 item %4 | expect ONE line with Counted = %5 | purged %6',
+                      #FileName, countingDate, warehouseId, itemId, expectedSum, purged);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

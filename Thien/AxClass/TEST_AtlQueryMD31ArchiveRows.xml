@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_AtlQueryMD31ArchiveRows</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// ATL query over MD31 archive rows (SJPMDItemMasterArchive).
+/// Use with TEST_AtlSpecMD31ArchiveRow and assertExpectedLinesSet.
+/// </summary>
+public final class TEST_AtlQueryMD31ArchiveRows extends AtlQuery
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>baseTableId</Name>
+				<Source><![CDATA[
+    protected TableId baseTableId()
+    {
+        return tableNum(SJPMDItemMasterArchive);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static TEST_AtlQueryMD31ArchiveRows construct()
+    {
+        return new TEST_AtlQueryMD31ArchiveRows();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>forFileName</Name>
+				<Source><![CDATA[
+    public TEST_AtlQueryMD31ArchiveRows forFileName(Filename _fileName)
+    {
+        this.addQueryRange(fieldNum(SJPMDItemMasterArchive, file_name), _fileName);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

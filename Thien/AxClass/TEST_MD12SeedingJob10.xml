@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12SeedingJob10</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 test case 16 - thread distribution / volume.
+/// Seeds EIGHT journal groups in one file by varying the counting date over
+/// eight consecutive days, so the case works with a single warehouse.
+/// Run the batch with NumOfThreads = 4: SJPMDInventCountingService::assignProcessingGroups
+/// must spread the 8 groups over ProcessingGroup 1..4 (two groups each), and
+/// every row of a given group must carry the same ProcessingGroup.
+/// Expect 8 counting journals.
+/// </summary>
+public final class TEST_MD12SeedingJob10
+{
+    #define.TestCase(10)
+    #define.FileName('TEST_MD12_TC10')
+    #define.GroupCount(8)
+    #define.ItemsPerGroup(2)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        info(TEST_MD12SeedingJob10::seed());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seed</Name>
+				<Source><![CDATA[
+    public static str seed(SJPMDInventCountingWarehouseId _warehouseA = '',
+                           SJPMDInventCountingWarehouseId _warehouseB = '')
+    {
+        SJPMDInventCountingWarehouseId warehouseId = TEST_MD12SeedDataHelper::resolveWarehouse(1, _warehouseA);
+        SJPMDInventCountingLocationId  locationId  = TEST_MD12SeedDataHelper::resolveLocation(warehouseId);
+        container                      items       = TEST_MD12SeedDataHelper::resolveItems(warehouseId, #ItemsPerGroup);
+        SJPMDInventCountingDate        countingDate;
+        SJPMDInventCountingDate        firstDate   = '';
+        SJPMDInventCountingDate        lastDate    = '';
+        ItemId                         itemId;
+        int                            groupIdx;
+        int                            itemIdx;
+        int                            rows        = 0;
+        int                            purged;
+
+        ttsbegin;
+        purged = TEST_MD12SeedDataHelper::purgeFileName(#FileName);
+
+        for (groupIdx = 1; groupIdx <= #GroupCount; groupIdx++)
+        {
+            countingDate = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet() - groupIdx + 1);
+
+            if (groupIdx == 1)
+            {
+                firstDate = countingDate;
+            }
+
+            lastDate = countingDate;
+
+            for (itemIdx = 1; itemIdx <= conLen(items); itemIdx++)
+            {
+                itemId = conPeek(items, itemIdx);
+
+                TEST_MD12SeedDataHelper::insertRow(
+                    #FileName,
+                    #FileName,
+                    TEST_MD12SeedDataHelper::voucherNumber(#TestCase, groupIdx * 10 + itemIdx),
+                    countingDate,
+                    warehouseId,
+                    locationId,
+                    itemId,
+                    TEST_MD12SeedDataHelper::onHandQty(itemId, warehouseId) + groupIdx);
+
+                rows++;
+            }
+        }
+        ttscommit;
+
+        return strFmt('TC16 | file %1 | %2 groups (warehouse %3, dates %4 back to %5) | %6 rows | run with NumOfThreads = 4 | expect %2 journals | purged %7',
+                      #FileName, #GroupCount, warehouseId, firstDate, lastDate, rows, purged);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

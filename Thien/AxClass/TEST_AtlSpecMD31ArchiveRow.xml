@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_AtlSpecMD31ArchiveRow</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// ATL specification of one expected MD31 archive row (SJPMDItemMasterArchive).
+/// Only the fields set with with... are compared.
+/// </summary>
+public final class TEST_AtlSpecMD31ArchiveRow extends AtlSpecification
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>expectedRecordTableId</Name>
+				<Source><![CDATA[
+    protected TableId expectedRecordTableId()
+    {
+        return tableNum(SJPMDItemMasterArchive);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static TEST_AtlSpecMD31ArchiveRow construct()
+    {
+        return new TEST_AtlSpecMD31ArchiveRow();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withSkuCode</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ArchiveRow withSkuCode(SJPMDItemMasterJANCode _skuCode)
+    {
+        this.parmExpectedFieldValue(fieldNum(SJPMDItemMasterArchive, sku_cd), _skuCode);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withCompanyCode</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ArchiveRow withCompanyCode(SJPMDItemMasterCompanyCode _companyCode)
+    {
+        this.parmExpectedFieldValue(fieldNum(SJPMDItemMasterArchive, crp_cd), _companyCode);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withStatus</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ArchiveRow withStatus(SJPMDInventImportStatus _status)
+    {
+        this.parmExpectedFieldValue(fieldNum(SJPMDItemMasterArchive, Status), _status);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

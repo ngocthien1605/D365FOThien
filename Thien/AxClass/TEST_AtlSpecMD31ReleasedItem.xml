@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_AtlSpecMD31ReleasedItem</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// ATL specification of a released product (InventTable) as MD31 leaves it.
+/// AtlSpecProductItem (AtlApplicationSuite) has no setter for TaraWeight,
+/// OrigCountryRegionId or the SJP extension fields, so this spec covers the fields
+/// MD31 writes in applyItemAttributes. Use with data.invent().items().query().withItemId(..).
+/// </summary>
+public final class TEST_AtlSpecMD31ReleasedItem extends AtlSpecification
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>expectedRecordTableId</Name>
+				<Source><![CDATA[
+    protected TableId expectedRecordTableId()
+    {
+        return tableNum(InventTable);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static TEST_AtlSpecMD31ReleasedItem construct()
+    {
+        return new TEST_AtlSpecMD31ReleasedItem();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withItemId</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ReleasedItem withItemId(ItemId _itemId)
+    {
+        this.parmExpectedFieldValue(fieldNum(InventTable, ItemId), _itemId);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withNameAlias</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ReleasedItem withNameAlias(str _nameAlias)
+    {
+        this.parmExpectedFieldValue(fieldNum(InventTable, NameAlias), _nameAlias);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withNetWeight</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ReleasedItem withNetWeight(real _netWeight)
+    {
+        this.parmExpectedFieldValue(fieldNum(InventTable, NetWeight), _netWeight);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withTaraWeight</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ReleasedItem withTaraWeight(real _taraWeight)
+    {
+        this.parmExpectedFieldValue(fieldNum(InventTable, TaraWeight), _taraWeight);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withGrossSize</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ReleasedItem withGrossSize(real _depth, real _width, real _height)
+    {
+        this.parmExpectedFieldValue(fieldNum(InventTable, grossDepth),  _depth);
+        this.parmExpectedFieldValue(fieldNum(InventTable, grossWidth),  _width);
+        this.parmExpectedFieldValue(fieldNum(InventTable, grossHeight), _height);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withUnitVolume</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ReleasedItem withUnitVolume(real _unitVolume)
+    {
+        this.parmExpectedFieldValue(fieldNum(InventTable, UnitVolume), _unitVolume);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withBOMUnitId</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ReleasedItem withBOMUnitId(str _unitId)
+    {
+        this.parmExpectedFieldValue(fieldNum(InventTable, BOMUnitId), _unitId);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withOrigCountryRegionId</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ReleasedItem withOrigCountryRegionId(str _countryRegionId)
+    {
+        this.parmExpectedFieldValue(fieldNum(InventTable, OrigCountryRegionId), _countryRegionId);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withParentJanFlag</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ReleasedItem withParentJanFlag(NoYes _flag)
+    {
+        this.parmExpectedFieldValue(fieldNum(InventTable, SJPMDParentJANFlag), _flag);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withDepartmentCode</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ReleasedItem withDepartmentCode(str _code)
+    {
+        this.parmExpectedFieldValue(fieldNum(InventTable, SJPMDDepartmentCode), _code);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withProductCategory</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ReleasedItem withProductCategory(str _category)
+    {
+        this.parmExpectedFieldValue(fieldNum(InventTable, SJPMDProductCategory), _category);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_CreateAndPostMovementJournalJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+public final class TEST_CreateAndPostMovementJournalJob
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        ItemId    itemId    = TEST_CreateReleasedProductJob::createReleasedProduct();
+        JournalId journalId = TEST_CreateAndPostMovementJournalJob::createAndPostForItem(itemId, 100, 50);
+
+        info(itemId);
+        info(journalId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createAndPostForItem</Name>
+				<Source><![CDATA[
+    public static JournalId createAndPostForItem(ItemId _itemId, Qty _qty = 1, CostAmount _costPrice = 100, InventLocationId _inventLocationId = '001000')
+    {
+        InventJournalTable journalTable;
+
+        if (!_itemId || !InventTable::find(_itemId).RecId || _qty <= 0)
+        {
+            throw Exception::Error;
+        }
+
+        ttsbegin;
+        journalTable = TEST_CreateAndPostMovementJournalJob::createMovementJournal(_itemId, _qty, _costPrice, _inventLocationId);
+        ttscommit;
+
+        TEST_CreateAndPostMovementJournalJob::postJournal(journalTable.JournalId);
+
+        return journalTable.JournalId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createMovementJournal</Name>
+				<Source><![CDATA[
+    private static InventJournalTable createMovementJournal(ItemId _itemId, Qty _qty, CostAmount _costPrice, InventLocationId _inventLocationId = '001000', str _offsetMainAccount = '100000000')
+    {
+        InventJournalName      journalName      = TEST_CreateAndPostMovementJournalJob::resolveMovementJournalName();
+        InventJournalTable     journalTable;
+        InventJournalTableData journalTableData = new InventJournalTableData(journalTable);
+        InventJournalTrans     journalTrans;
+        InventJournalTransData journalTransData;
+        InventDim              inventDim        = TEST_RunTestDataPreparationSmokeJob::resolveDefaultInventDim(_inventLocationId);
+        InventTable            inventTable      = InventTable::find(_itemId);
+        DimensionAttributeValueCombination  dimAttrValueCombo;
+
+        if (!journalName.RecId || !inventDim.InventDimId || !inventTable.RecId)
+        {
+            throw Exception::Error;
+        }
+
+        journalTable.initValue();
+        journalTable.JournalId     = journalTableData.nextJournalId();
+        journalTable.JournalNameId = journalName.JournalNameId;
+        journalTable.initFromInventJournalName(journalName);
+        journalTable.insert();
+
+        journalTransData = journalTableData.journalStatic().newJournalTransData(journalTrans, journalTableData);
+        journalTransData.initFromJournalTable();
+        journalTrans.TransDate = DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+        journalTransData.initVoucher('', false);
+        journalTransData.addJournalTransVoucher();
+
+        journalTrans.ItemId      = _itemId;
+        journalTrans.initFromInventTable(inventTable);
+        journalTrans.InventDimId = inventDim.InventDimId;
+        journalTrans.Qty         = _qty;
+
+        if (_costPrice > 0)
+        {
+            journalTrans.CostPrice  = _costPrice;
+            journalTrans.CostAmount = journalTrans.calcCostAmount();
+        }
+
+        dimAttrValueCombo.clear();
+        select firstonly RecId from  dimAttrValueCombo
+            where dimAttrValueCombo.MainAccount == MainAccount::findByMainAccountId(_offsetMainAccount).RecId //Replace the MainAccountId according to your data
+                && dimAttrValueCombo.DisplayValue == _offsetMainAccount;
+
+        journalTrans.LedgerDimension = dimAttrValueCombo.RecId;
+
+
+        if (!journalTrans.validateWrite())
+        {
+            throw Exception::Error;
+        }
+
+        journalTrans.insert();
+
+        return journalTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveMovementJournalName</Name>
+				<Source><![CDATA[
+    private static InventJournalName resolveMovementJournalName()
+    {
+        InventJournalName journalName;
+
+        select firstonly journalName
+            where journalName.JournalType == InventJournalType::Movement;
+
+        if (!journalName.RecId)
+        {
+            throw Exception::Error;
+        }
+
+        return journalName;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postJournal</Name>
+				<Source><![CDATA[
+    private static void postJournal(JournalId _journalId)
+    {
+        InventJournalTable journalTable = InventJournalTable::find(_journalId);
+        JournalCheckPost   checkPost;
+
+        if (!journalTable.RecId)
+        {
+            throw Exception::Error;
+        }
+
+        if (journalTable.Posted == NoYes::Yes)
+        {
+            return;
+        }
+
+        checkPost = InventJournalCheckPost::newPostJournal(journalTable);
+        checkPost.run();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createPostInventoryMovementJournal</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// VERSION 2
+    /// </summary>
+    /// <param name = "_itemId"></param>
+    /// <param name = "_qty"></param>
+    /// <param name = "_inventLocationId"></param>
+    /// <param name = "_inventSiteId"></param>
+    /// <param name = "_offsetMainAccount"></param>
+    /// <returns></returns>
+    public static InventJournalId createPostInventoryMovementJournal(
+              ItemId _itemId = 'Test_Item1'
+            , InventQty _qty = 99
+            , InventLocationId _inventLocationId = '001000'
+            , InventSiteId _inventSiteId = 'DMG'
+            , str _offsetMainAccount = '100000000'
+    )
+    {
+        JournalCheckPost                    journalCheckPost;
+        InventJournalTable                  inventJournalTable;
+        InventJournalTrans                  inventJournalTrans;
+        InventJournalNameId                 inventJournalNameId;
+        InventJournalName                   inventJournalName;
+        InventDim                           inventDim;
+        DimensionAttributeValueCombination  dimAttrValueCombo;
+        int                                 numOfLines = 0;
+
+
+        ttsbegin;
+        //creates journal header
+        inventJournalTable.clear();
+        inventJournalNameId =  InventJournalName::standardJournalName(InventJournalType::Movement);
+        inventJournalTable.initFromInventJournalName(InventJournalName::find(inventJournalNameId));
+        inventJournalTable.insert();
+
+        //creates a single line
+        inventJournalTrans.clear();
+        inventJournalTrans.initFromInventJournalTable(inventJournalTable);
+        inventJournalTrans.TransDate = systemDateGet();
+        inventJournalTrans.ItemId = _itemId;
+        inventJournalTrans.initFromInventTable(InventTable::find(inventJournalTrans.ItemId));
+        inventJournalTrans.Qty = _qty;
+        inventdim.InventSiteId = _inventSiteId;
+        inventdim.InventLocationId = _inventLocationId;
+        inventDim.wMSLocationId = InventLocation::find(_inventLocationId).WMSLocationIdDefaultReceipt;
+        inventJournalTrans.InventDimId = InventdIm::findOrCreate(inventDim).inventDimId;
+
+        dimAttrValueCombo.clear();
+        select firstonly RecId from  dimAttrValueCombo
+where dimAttrValueCombo.MainAccount == MainAccount::findByMainAccountId(_offsetMainAccount).RecId //Replace the MainAccountId according to your data
+&& dimAttrValueCombo.DisplayValue == _offsetMainAccount;
+
+        inventJournalTrans.LedgerDimension = dimAttrValueCombo.RecId;
+
+        //Insert line to movement journal if quantity is non-zero
+        if(inventJournalTrans.Qty > 0)
+        {
+            numOfLines++;
+            inventJournalTrans.insert();
+        }
+
+        //updating number of lines field at header level of Movement Journal
+        inventJournalTable.NumOfLines = numOfLines;
+        inventJournalTable.update();
+        info(strFmt("Movement Journal ID is created: %1", inventJournalTable.JournalId));
+
+        journalCheckPost = InventJournalCheckPost::newPostJournal(inventJournalTable);
+        journalCheckPost.run();
+        info(strFmt("Movement Journal ID is posted: %1", inventJournalTable.JournalId));
+        ttscommit;
+        return InventJournalTable.JournalId;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

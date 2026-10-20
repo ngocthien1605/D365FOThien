@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_AtlDataMD31</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// ATL navigation node for the MD31 item master import, reached as data.md31()
+/// through TEST_AtlDataRootNodeMD31_Extension. Groups the factory, query and
+/// specification methods for the MD31 tables, as AtlData* nodes do for standard modules.
+/// </summary>
+public final class TEST_AtlDataMD31 extends AtlDataNode
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>initRow</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// A new, unsaved input row as the file import leaves it: Status New, group 0.
+    /// The file name doubles as the ExecutionId, which processGroup groups by.
+    /// </summary>
+    public TEST_AtlEntityMD31ItemMasterRow initRow(Filename _fileName, SJPMDItemMasterJANCode _skuCode)
+    {
+        return TEST_AtlEntityMD31ItemMasterRow::construct()
+            .setFileName(_fileName)
+            .setExecutionId(_fileName)
+            .setCompanyCode('TEST')
+            .setSkuCode(_skuCode)
+            .setNameEnglish('MD31 test ' + _skuCode);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rows</Name>
+				<Source><![CDATA[
+    public TEST_AtlQueryMD31ItemMasterRows rows()
+    {
+        return TEST_AtlQueryMD31ItemMasterRows::construct();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rowSpec</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ItemMasterRow rowSpec()
+    {
+        return TEST_AtlSpecMD31ItemMasterRow::construct();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>archive</Name>
+				<Source><![CDATA[
+    public TEST_AtlQueryMD31ArchiveRows archive()
+    {
+        return TEST_AtlQueryMD31ArchiveRows::construct();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>archiveSpec</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ArchiveRow archiveSpec()
+    {
+        return TEST_AtlSpecMD31ArchiveRow::construct();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>releasedItemSpec</Name>
+				<Source><![CDATA[
+    public TEST_AtlSpecMD31ReleasedItem releasedItemSpec()
+    {
+        return TEST_AtlSpecMD31ReleasedItem::construct();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setParameters</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Writes the MD31 parameters record of the current company (one record per company;
+    /// SJPMDItemMasterParam::find selects the first). Inside a test it is rolled back.
+    /// </summary>
+    public SJPMDItemMasterParam setParameters(
+        EcoResStorageDimensionGroupName  _storageGroupName,
+        EcoResTrackingDimensionGroupName _trackingGroupName,
+        InventModelGroupId               _modelGroupId,
+        ItemGroupId                      _itemGroupId,
+        UnitIDBase                       _unitId,
+        Name                             _nullDateLiteral)
+    {
+        SJPMDItemMasterParam parameters;
+
+        ttsbegin;
+
+        parameters = SJPMDItemMasterParam::find(true);
+
+        parameters.DefaultStorageDimensionGroupName  = _storageGroupName;
+        parameters.DefaultTrackingDimensionGroupName = _trackingGroupName;
+        parameters.DefaultModelGroupId               = _modelGroupId;
+        parameters.DefaultItemGroupId                = _itemGroupId;
+        parameters.DefaultUnitIDBase                 = _unitId;
+        parameters.NullDateLiteral                   = _nullDateLiteral;
+        parameters.DefaultProductType                = EcoResProductType::Item;
+
+        if (parameters.RecId)
+        {
+            parameters.update();
+        }
+        else
+        {
+            parameters.insert();
+        }
+
+        ttscommit;
+
+        return parameters;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

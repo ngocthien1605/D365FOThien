@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_AtlQueryMD31ItemMasterRows</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// ATL query over MD31 input rows (SJPMDItemMaster), on the pattern of AtlQueryProductItems.
+/// Use with TEST_AtlSpecMD31ItemMasterRow and assertExpectedLinesSet.
+/// </summary>
+public final class TEST_AtlQueryMD31ItemMasterRows extends AtlQuery
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>baseTableId</Name>
+				<Source><![CDATA[
+    protected TableId baseTableId()
+    {
+        return tableNum(SJPMDItemMaster);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static TEST_AtlQueryMD31ItemMasterRows construct()
+    {
+        return new TEST_AtlQueryMD31ItemMasterRows();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>forFileName</Name>
+				<Source><![CDATA[
+    public TEST_AtlQueryMD31ItemMasterRows forFileName(Filename _fileName)
+    {
+        this.addQueryRange(fieldNum(SJPMDItemMaster, file_name), _fileName);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>withSkuCode</Name>
+				<Source><![CDATA[
+    public TEST_AtlQueryMD31ItemMasterRows withSkuCode(SJPMDItemMasterJANCode _skuCode)
+    {
+        this.addQueryRange(fieldNum(SJPMDItemMaster, sku_cd), _skuCode);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

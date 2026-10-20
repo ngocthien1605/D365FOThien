@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12SeedingJob01</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 test case 1 - single file, single warehouse, single date, single item.
+/// Seeds 1 staging row = 1 journal group, so the batch must produce
+/// exactly one counting journal with one line.
+/// </summary>
+public final class TEST_MD12SeedingJob01
+{
+    #define.TestCase(1)
+    #define.FileName('TEST_MD12_TC01')
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        info(TEST_MD12SeedingJob01::seed());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seed</Name>
+				<Source><![CDATA[
+    public static str seed(SJPMDInventCountingWarehouseId _warehouseA = '',
+                           SJPMDInventCountingWarehouseId _warehouseB = '')
+    {
+        SJPMDInventCountingWarehouseId warehouseId  = TEST_MD12SeedDataHelper::resolveWarehouse(1, _warehouseA);
+        SJPMDInventCountingLocationId  locationId   = TEST_MD12SeedDataHelper::resolveLocation(warehouseId);
+        SJPMDInventCountingDate        countingDate = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
+        container                      items        = TEST_MD12SeedDataHelper::resolveItems(warehouseId, 1);
+        ItemId                         itemId       = conPeek(items, 1);
+        real                           counted;
+        int                            purged;
+
+        counted = TEST_MD12SeedDataHelper::onHandQty(itemId, warehouseId) + 5;
+
+        ttsbegin;
+        purged = TEST_MD12SeedDataHelper::purgeFileName(#FileName);
+
+        TEST_MD12SeedDataHelper::insertRow(
+            #FileName,
+            #FileName,
+            TEST_MD12SeedDataHelper::voucherNumber(#TestCase, 1),
+            countingDate,
+            warehouseId,
+            locationId,
+            itemId,
+            counted);
+        ttscommit;
+
+        return strFmt('TC01 | file %1 | 1 group (%2 / %3) | 1 row | item %4 counted %5 | purged %6',
+                      #FileName, countingDate, warehouseId, itemId, counted, purged);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

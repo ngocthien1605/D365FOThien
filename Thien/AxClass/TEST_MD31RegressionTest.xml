@@ -1,0 +1,797 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD31RegressionTest</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD31 item master import - regression tests built on the Acceptance Test Library (ATL).
+///
+/// Runs in the empty DAT company (no SysTestCaseDataDependency): ATL finds or creates the
+/// storage and tracking dimension groups, model group, item group, unit and country the
+/// MD31 parameters point to, and the existing items some cases start from. Nothing depends
+/// on the master data of a real company.
+///
+/// Each test seeds its own input rows (file TEST_MD31_TCnn, SKUs ZT31TCnn...), calls
+/// SJPMDItemMasterImportBatchService.processGroup(0, file) - the call one batch task makes -
+/// and asserts with ATL queries and specifications. Everything is rolled back afterwards.
+///
+/// Expected values are read off the MD31 code (they pin current behaviour), except where a
+/// method comment says otherwise. Not covered: the orchestrator (group assignment, run lock,
+/// batch tasks), the final task and the summary email.
+/// </summary>
+[SysTestTarget(classStr(SJPMDItemMasterImportBatchService), UtilElementType::Class)]
+[SysTestTransaction(TestTransactionMode::AutoRollback)]
+[SysTestCaseAutomaticNumberSequences]
+public final class TEST_MD31RegressionTest extends SysTestCase
+{
+    // Seeded rows stay in processing group 0 until the orchestrator assigns them.
+    #define.UnassignedGroup(0)
+    // Must itself be a valid YYYYMMDD: validateParameters rejects any other literal.
+    #define.NullDateLiteral('99991231')
+    #define.TestCountry('JPN')
+    #define.TestCountryIso('JP')
+    #define.TestItemGroup('MD31TEST')
+
+    AtlDataRootNode              data;
+    AtlDataInvent                invent;
+    TEST_AtlDataMD31             md31;
+
+    EcoResStorageDimensionGroup  storageGroup;
+    EcoResTrackingDimensionGroup trackingGroup;
+    InventModelGroup             modelGroup;
+    InventItemGroup              itemGroup;
+    UnitOfMeasure                unit;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setUp</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Builds the setup MD31 validates, with ATL, and points the MD31 parameters at it.
+    /// The model group and unit are the ones ATL gives its own items, so updating an
+    /// existing ATL item changes neither; the item group is a separate one, so the
+    /// item-group rule is visible.
+    /// </summary>
+    public void setUp()
+    {
+        super();
+
+        data   = AtlDataRootNode::construct();
+        invent = data.invent();
+        md31   = data.md31();
+
+        storageGroup  = invent.storageDimGroups().default();
+        trackingGroup = invent.trackingDimGroups().default();
+        modelGroup    = invent.modelGroups().default().record();
+        unit          = invent.units().default();
+        itemGroup     = invent.itemGroups().findOrCreate(#TestItemGroup);
+
+        data.common().addressCountryRegions().findOrCreate(#TestCountry, #TestCountryIso);
+
+        md31.setParameters(storageGroup.Name,
+                           trackingGroup.Name,
+                           modelGroup.ModelGroupId,
+                           itemGroup.ItemGroupId,
+                           unit.Symbol,
+                           #NullDateLiteral);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc01_newSku_isCreatedReleasedAndArchived</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC01: a new SKU with every mapped field filled. The product is created and released
+    /// with the configured groups and unit, the fields are mapped, the row is archived as
+    /// Created and removed from the input table.
+    /// TaraWeight: applyItemAttributes writes oc_gross_weight to InventTable.TaraWeight; the
+    /// class header says GrossWeight. This test pins the code - confirm which one is right.
+    /// </summary>
+    [SysTestMethod]
+    public void tc01_newSku_isCreatedReleasedAndArchived()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC01';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC01S001';
+
+        this.assertSkuIsFree(Sku);
+        this.initFullRow(TestFile, Sku).save();
+
+        this.process(TestFile);
+
+        this.assertArchivedOnly(TestFile, Sku, SJPMDInventImportStatus::Created);
+
+        invent.items().query().withItemId(Sku).assertExpectedLinesSet(AtlSpecifications::construct()
+            .addSpec(md31.releasedItemSpec()
+                .withItemId(Sku)
+                .withNameAlias(Sku)
+                .withNetWeight(1.2)
+                .withTaraWeight(1.5)
+                .withGrossSize(30.5, 20, 10)
+                .withUnitVolume(24)
+                .withBOMUnitId(unit.Symbol)
+                .withOrigCountryRegionId(#TestCountry)
+                .withParentJanFlag(NoYes::Yes)
+                .withDepartmentCode('D01')
+                .withProductCategory('CAT1')),
+            'Released product after MD31');
+
+        this.assertEquals('MD31 test ' + Sku, this.productName(Sku, 'en-us'), 'English product name');
+        this.assertEquals('Local name', this.productName(Sku, 'ja'), 'Japanese product name');
+
+        this.assertModule(Sku, ModuleInventPurchSales::Sales,  108);
+        this.assertModule(Sku, ModuleInventPurchSales::Invent, 0);
+        this.assertModule(Sku, ModuleInventPurchSales::Purch,  0);
+
+        this.assertEquals(itemGroup.ItemGroupId, this.itemGroupOf(Sku), 'Item group from the MD31 parameters');
+        this.assertEquals(modelGroup.ModelGroupId, this.modelGroupOf(Sku), 'Model group from the MD31 parameters');
+        this.assertEquals(storageGroup.RecId, this.storageGroupOf(Sku), 'Storage dimension group from the MD31 parameters');
+        this.assertEquals(trackingGroup.RecId, this.trackingGroupOf(Sku), 'Tracking dimension group from the MD31 parameters');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc02_existingItem_isUpdatedAndItemGroupSwitched</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC02: the SKU is already a released product (created with ATL) without inventory
+    /// transactions. MD31 updates it (archive Status Updated), maps the new values and
+    /// moves it to the configured item group.
+    /// </summary>
+    [SysTestMethod]
+    public void tc02_existingItem_isUpdatedAndItemGroupSwitched()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC02';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC02S001';
+
+        this.assertSkuIsFree(Sku);
+        this.createExistingItem(Sku);
+        this.assertNotEqual(itemGroup.ItemGroupId, this.itemGroupOf(Sku), 'Arrange: the ATL item must start in another item group');
+
+        md31.initRow(TestFile, Sku).setCaseWeights(2.0, 2.5).save();
+
+        this.process(TestFile);
+
+        this.assertArchivedOnly(TestFile, Sku, SJPMDInventImportStatus::Updated);
+
+        invent.items().query().withItemId(Sku).assertExpectedLinesSet(AtlSpecifications::construct()
+            .addSpec(md31.releasedItemSpec().withItemId(Sku).withNetWeight(2.0).withTaraWeight(2.5)),
+            'Existing item after MD31');
+
+        this.assertEquals(itemGroup.ItemGroupId, this.itemGroupOf(Sku), 'Without inventory transactions the item moves to the configured item group');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc03_existingItemWithTransactions_keepsItemGroup</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC03: the existing item already has inventory transactions (an ATL adjustment
+    /// journal posted on-hand). MD31 still updates it, but ensureItemGroupInCompany keeps
+    /// its item group.
+    /// </summary>
+    [SysTestMethod]
+    public void tc03_existingItemWithTransactions_keepsItemGroup()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC03';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC03S001';
+        InventTrans                  inventTrans;
+
+        this.assertSkuIsFree(Sku);
+        InventTable item = this.createExistingItem(Sku);
+        ItemGroupId originalGroup = this.itemGroupOf(Sku);
+
+        // postJournal() builds the journal directly, without the ensure hooks of
+        // adjustmentJournals().initDefault(); set up journal and posting prerequisites first,
+        // as AtlWHSEWTestCase does for a new company.
+        invent.adjustmentJournals().ensureCanCreate();
+        invent.adjustmentJournals().ensureCanPost();
+
+        invent.onHand().adjust()
+            .forItem(item)
+            .forWarehouse(invent.warehouses().default())
+            .setQty(5)
+            .setPostedValue(50)
+            .postJournal();
+
+        select firstonly RecId from inventTrans where inventTrans.ItemId == Sku;
+        this.assertTrue(inventTrans.RecId != 0, 'Arrange: the posted adjustment must have created inventory transactions');
+
+        md31.initRow(TestFile, Sku).save();
+
+        this.process(TestFile);
+
+        this.assertArchivedOnly(TestFile, Sku, SJPMDInventImportStatus::Updated);
+        this.assertEquals(originalGroup, this.itemGroupOf(Sku), 'An item with inventory transactions keeps its item group');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc04_missingEnglishName_skuInError</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC04: sku_name_en is mandatory. The SKU ends in Error with the flag and a message,
+    /// nothing is archived and no product is created.
+    /// </summary>
+    [SysTestMethod]
+    public void tc04_missingEnglishName_skuInError()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC04';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC04S001';
+
+        this.assertSkuIsFree(Sku);
+        md31.initRow(TestFile, Sku).setNameEnglish('').save();
+
+        this.process(TestFile);
+
+        this.assertSkuInError(TestFile, Sku, 1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc05_negativePrice_skuInError</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC05: a negative price fails validation.
+    /// </summary>
+    [SysTestMethod]
+    public void tc05_negativePrice_skuInError()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC05';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC05S001';
+
+        this.assertSkuIsFree(Sku);
+        md31.initRow(TestFile, Sku).setPrice(-1).save();
+
+        this.process(TestFile);
+
+        this.assertSkuInError(TestFile, Sku, 1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc06_invalidSellDate_skuInError</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC06: sel_tm_bg is not a calendar date (month 13).
+    /// </summary>
+    [SysTestMethod]
+    public void tc06_invalidSellDate_skuInError()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC06';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC06S001';
+
+        this.assertSkuIsFree(Sku);
+        md31.initRow(TestFile, Sku).setSellStart('20261301').save();
+
+        this.process(TestFile);
+
+        this.assertSkuInError(TestFile, Sku, 1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc07_sellStartAfterEnd_skuInError</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC07: two valid dates, but the sell start is after the sell end.
+    /// </summary>
+    [SysTestMethod]
+    public void tc07_sellStartAfterEnd_skuInError()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC07';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC07S001';
+
+        this.assertSkuIsFree(Sku);
+        md31.initRow(TestFile, Sku).setSellStart('20271231').setSellEnd('20270101').save();
+
+        this.process(TestFile);
+
+        this.assertSkuInError(TestFile, Sku, 1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc08_unknownCountry_skuInError</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC08: a country of origin that does not exist in LogisticsAddressCountryRegion.
+    /// </summary>
+    [SysTestMethod]
+    public void tc08_unknownCountry_skuInError()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC08';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC08S001';
+        const str                    Unknown  = 'ZZZ';
+
+        this.assertSkuIsFree(Sku);
+        this.assertFalse(LogisticsAddressCountryRegion::exist(Unknown), 'Arrange: country ZZZ must not exist');
+        md31.initRow(TestFile, Sku).setCountryOfOrigin(Unknown).save();
+
+        this.process(TestFile);
+
+        this.assertSkuInError(TestFile, Sku, 1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc09_nullDateLiteral_isCreatedWithoutSellDates</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC09: both sell dates carry the configured null-date literal. They pass validation
+    /// and are not written, so the sell dates stay empty.
+    /// </summary>
+    [SysTestMethod]
+    public void tc09_nullDateLiteral_isCreatedWithoutSellDates()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC09';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC09S001';
+
+        this.assertSkuIsFree(Sku);
+        md31.initRow(TestFile, Sku).setSellStart(#NullDateLiteral).setSellEnd(#NullDateLiteral).save();
+
+        this.process(TestFile);
+
+        this.assertArchivedOnly(TestFile, Sku, SJPMDInventImportStatus::Created);
+
+        MCRInventTable mcrInventTable = this.mcrInventTableOf(Sku);
+        this.assertEquals(dateNull(), mcrInventTable.SellStartDate, 'Sell start stays empty for the null-date literal');
+        this.assertEquals(dateNull(), mcrInventTable.SellEndDate, 'Sell end stays empty for the null-date literal');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc10_sellDates_areWrittenToMcrInventTable</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC10: valid sell dates are parsed from YYYYMMDD and written to MCRInventTable.
+    /// </summary>
+    [SysTestMethod]
+    public void tc10_sellDates_areWrittenToMcrInventTable()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC10';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC10S001';
+
+        this.assertSkuIsFree(Sku);
+        md31.initRow(TestFile, Sku).setSellStart('20261101').setSellEnd('20271031').save();
+
+        this.process(TestFile);
+
+        this.assertArchivedOnly(TestFile, Sku, SJPMDInventImportStatus::Created);
+
+        MCRInventTable mcrInventTable = this.mcrInventTableOf(Sku);
+        this.assertEquals(mkDate(1, 11, 2026), mcrInventTable.SellStartDate, 'Sell start from sel_tm_bg');
+        this.assertEquals(mkDate(31, 10, 2027), mcrInventTable.SellEndDate, 'Sell end from sel_tm_en');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc11_posBlockFlag_blocksItemOnPos</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC11: rel_flag = 1 sets RetailInventTable.blockedOnPOS. The standard InventTable.insert
+    /// creates the RetailInventTable row only when the Retail configuration key is on.
+    /// </summary>
+    [SysTestMethod]
+    public void tc11_posBlockFlag_blocksItemOnPos()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC11';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC11S001';
+        RetailInventTable            retailInventTable;
+
+        this.assertTrue(isConfigurationkeyEnabled(configurationKeyNum(Retail)), 'Arrange: the Retail configuration key must be on for RetailInventTable to exist');
+        this.assertSkuIsFree(Sku);
+        md31.initRow(TestFile, Sku).setPosBlockFlag(1).save();
+
+        this.process(TestFile);
+
+        this.assertArchivedOnly(TestFile, Sku, SJPMDInventImportStatus::Created);
+
+        select firstonly retailInventTable where retailInventTable.ItemId == Sku;
+        this.assertTrue(retailInventTable.RecId != 0, 'The release must have created RetailInventTable');
+        this.assertEquals(NoYes::Yes, retailInventTable.blockedOnPOS, 'rel_flag 1 blocks the item on POS');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc12_oneBadSku_otherSkuInSameFileIsCreated</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC12: two SKUs in one file, one with a negative price. Errors are isolated per SKU:
+    /// the bad one ends in Error, the good one is created and archived.
+    /// </summary>
+    [SysTestMethod]
+    public void tc12_oneBadSku_otherSkuInSameFileIsCreated()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC12';
+        const SJPMDItemMasterJANCode GoodSku  = 'ZT31TC12S001';
+        const SJPMDItemMasterJANCode BadSku   = 'ZT31TC12S002';
+
+        this.assertSkuIsFree(GoodSku);
+        this.assertSkuIsFree(BadSku);
+        md31.initRow(TestFile, GoodSku).save();
+        md31.initRow(TestFile, BadSku).setPrice(-1).save();
+
+        this.process(TestFile);
+
+        md31.archive().forFileName(TestFile).assertExpectedLinesSet(AtlSpecifications::construct()
+            .addSpec(md31.archiveSpec().withSkuCode(GoodSku).withStatus(SJPMDInventImportStatus::Created)),
+            'Only the good SKU is archived');
+
+        md31.rows().forFileName(TestFile).assertExpectedLinesSet(AtlSpecifications::construct()
+            .addSpec(md31.rowSpec().withSkuCode(BadSku).withStatus(SJPMDInventImportStatus::Error).withErrorFlag(NoYes::Yes)),
+            'Only the bad SKU is left, in Error');
+
+        this.assertTrue(InventTable::exist(GoodSku), 'The good SKU is released');
+        this.assertFalse(this.productExists(BadSku), 'No product is created for the bad SKU');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc13_fileFilter_otherFileStaysNew</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC13: processGroup filters by file name. Processing file A leaves file B at New.
+    /// </summary>
+    [SysTestMethod]
+    public void tc13_fileFilter_otherFileStaysNew()
+    {
+        const Filename               FileA = 'TEST_MD31_TC13_A';
+        const Filename               FileB = 'TEST_MD31_TC13_B';
+        const SJPMDItemMasterJANCode SkuA  = 'ZT31TC13S001';
+        const SJPMDItemMasterJANCode SkuB  = 'ZT31TC13S002';
+
+        this.assertSkuIsFree(SkuA);
+        this.assertSkuIsFree(SkuB);
+        md31.initRow(FileA, SkuA).save();
+        md31.initRow(FileB, SkuB).save();
+
+        this.process(FileA);
+
+        this.assertArchivedOnly(FileA, SkuA, SJPMDInventImportStatus::Created);
+
+        md31.rows().forFileName(FileB).assertExpectedLinesSet(AtlSpecifications::construct()
+            .addSpec(md31.rowSpec().withSkuCode(SkuB).withStatus(SJPMDInventImportStatus::New)),
+            'File B was not selected and stays at New');
+        this.assertFalse(this.productExists(SkuB), 'No product is created for file B');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc14_missingParameter_skuInError</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC14: the parameters lack a default model group. validateParameters reports it and
+    /// every SKU of the run ends in Error.
+    /// </summary>
+    [SysTestMethod]
+    public void tc14_missingParameter_skuInError()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC14';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC14S001';
+
+        md31.setParameters(storageGroup.Name, trackingGroup.Name, '', itemGroup.ItemGroupId, unit.Symbol, #NullDateLiteral);
+
+        this.assertSkuIsFree(Sku);
+        md31.initRow(TestFile, Sku).save();
+
+        this.process(TestFile);
+
+        this.assertSkuInError(TestFile, Sku, 1);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc15_twoRowsSameSku_areArchivedTogether</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC15: two rows of the same SKU in one file (different crp_cd, as the unique index
+    /// file_name + crp_cd + sku_cd requires). They form one partition: one product, and
+    /// both rows archived as Created.
+    /// </summary>
+    [SysTestMethod]
+    public void tc15_twoRowsSameSku_areArchivedTogether()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC15';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC15S001';
+        EcoResDistinctProduct        product;
+
+        this.assertSkuIsFree(Sku);
+        md31.initRow(TestFile, Sku).setCompanyCode('TEST1').save();
+        md31.initRow(TestFile, Sku).setCompanyCode('TEST2').save();
+
+        this.process(TestFile);
+
+        md31.archive().forFileName(TestFile).assertExpectedLinesSet(AtlSpecifications::construct()
+            .addSpec(md31.archiveSpec().withSkuCode(Sku).withCompanyCode('TEST1').withStatus(SJPMDInventImportStatus::Created))
+            .addSpec(md31.archiveSpec().withSkuCode(Sku).withCompanyCode('TEST2').withStatus(SJPMDInventImportStatus::Created)),
+            'Both rows of the SKU are archived');
+        md31.rows().forFileName(TestFile).assertCount(0, 'No input row is left');
+
+        select count(RecId) from product where product.DisplayProductNumber == Sku;
+        this.assertTrue(product.RecId == 1, strFmt('Expected one product for the SKU, found %1', product.RecId));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initFullRow</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// An input row with every field MD31 maps, for TC01.
+    /// </summary>
+    private TEST_AtlEntityMD31ItemMasterRow initFullRow(Filename _fileName, SJPMDItemMasterJANCode _sku)
+    {
+        return md31.initRow(_fileName, _sku)
+            .setNameLocal('Local name')
+            .setParentJanFlag(1)
+            .setDepartmentCode('D01')
+            .setProductCategory('CAT1')
+            .setCaseQuantity(24)
+            .setCaseSize(30.5, 20, 10)
+            .setCaseWeights(1.2, 1.5)
+            .setCountryOfOrigin(#TestCountry)
+            .setPrice(108)
+            .setSellStart('20261101')
+            .setSellEnd('20271031');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createExistingItem</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// An item already released in the test company, created with ATL's default template.
+    /// MD31 recognises an existing product by EcoResDistinctProduct.DisplayProductNumber, so
+    /// the precondition below checks that ATL gave the product the item number.
+    /// </summary>
+    private InventTable createExistingItem(ItemId _itemId)
+    {
+        InventTable item = invent.items().defaultBuilder().setItemId(_itemId).create();
+
+        this.assertTrue(item.RecId != 0, strFmt('Arrange: ATL did not create item %1', _itemId));
+        this.assertEquals(_itemId, EcoResProduct::find(item.Product).DisplayProductNumber,
+            'Arrange: the ATL product number must equal the item number, or MD31 creates a second product');
+
+        return item;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>process</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Runs the per-group worker for one file, as one batch task would.
+    /// </summary>
+    private void process(Filename _fileName)
+    {
+        SJPMDItemMasterImportBatchService service = new SJPMDItemMasterImportBatchService();
+
+        service.processGroup(#UnassignedGroup, _fileName);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertSkuIsFree</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Products are shared across companies, so a test SKU must not exist anywhere yet.
+    /// </summary>
+    private void assertSkuIsFree(SJPMDItemMasterJANCode _sku)
+    {
+        this.assertFalse(this.productExists(_sku),
+            strFmt('Arrange: a product %1 already exists in this environment; choose another test SKU', _sku));
+        this.assertFalse(InventTable::exist(_sku),
+            strFmt('Arrange: item %1 already exists in company %2', _sku, curExt()));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertArchivedOnly</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The file's archive holds exactly one row, for the SKU and with the status, and the
+    /// input table holds none of the file's rows.
+    /// </summary>
+    private void assertArchivedOnly(Filename _fileName, SJPMDItemMasterJANCode _sku, SJPMDInventImportStatus _status)
+    {
+        TEST_AtlQueryMD31ItemMasterRows errorRows = md31.rows().forFileName(_fileName);
+        SJPMDItemMaster                 firstLeft = errorRows.firstOrDefault();
+
+        this.assertFalse(firstLeft.RecId != 0,
+            strFmt('File %1: no input row may be left. First row: %2 status %3, error: %4',
+                   _fileName, firstLeft.sku_cd, firstLeft.Status, firstLeft.ErrorMessage));
+
+        md31.archive().forFileName(_fileName).assertExpectedLinesSet(AtlSpecifications::construct()
+            .addSpec(md31.archiveSpec().withSkuCode(_sku).withStatus(_status)),
+            strFmt('Archive of file %1', _fileName));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertSkuInError</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// All _rows rows of the SKU stay in the input table in Error with the flag and a
+    /// message; nothing is archived and no product exists.
+    /// </summary>
+    private void assertSkuInError(Filename _fileName, SJPMDItemMasterJANCode _sku, int _rows)
+    {
+        AtlSpecifications specs = AtlSpecifications::construct();
+        int               i;
+        SJPMDItemMaster   row;
+
+        for (i = 1; i <= _rows; i++)
+        {
+            specs.addSpec(md31.rowSpec().withSkuCode(_sku).withStatus(SJPMDInventImportStatus::Error).withErrorFlag(NoYes::Yes));
+        }
+
+        md31.rows().forFileName(_fileName).assertExpectedLinesSet(specs, strFmt('Input rows of %1', _sku));
+
+        row = md31.rows().forFileName(_fileName).first();
+        this.assertTrue(row.ErrorMessage != '', 'An error row must carry a message');
+
+        md31.archive().forFileName(_fileName).assertCount(0, 'Nothing is archived for a SKU in error');
+        this.assertFalse(this.productExists(_sku), 'No product is created for a SKU in error');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertModule</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The item module exists with the configured unit and the expected price.
+    /// </summary>
+    private void assertModule(ItemId _itemId, ModuleInventPurchSales _module, Price _price)
+    {
+        InventTableModule inventTableModule = InventTableModule::find(_itemId, _module);
+
+        this.assertTrue(inventTableModule.RecId != 0, strFmt('Item module %1 must exist', _module));
+        this.assertEquals(unit.Symbol, inventTableModule.UnitId, strFmt('Unit of module %1', _module));
+        this.assertEquals(_price, inventTableModule.Price, strFmt('Price of module %1', _module));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>productExists</Name>
+				<Source><![CDATA[
+    private boolean productExists(SJPMDItemMasterJANCode _sku)
+    {
+        EcoResDistinctProduct product;
+
+        select firstonly RecId from product where product.DisplayProductNumber == _sku;
+
+        return product.RecId != 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>productName</Name>
+				<Source><![CDATA[
+    private str productName(SJPMDItemMasterJANCode _sku, LanguageId _languageId)
+    {
+        EcoResDistinctProduct    product;
+        EcoResProductTranslation translation;
+
+        select firstonly Name from translation
+            where translation.LanguageId == _languageId
+            exists join product
+                where product.RecId                == translation.Product
+                   && product.DisplayProductNumber == _sku;
+
+        return translation.Name;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>itemGroupOf</Name>
+				<Source><![CDATA[
+    private ItemGroupId itemGroupOf(ItemId _itemId)
+    {
+        InventItemGroupItem inventItemGroupItem;
+
+        select firstonly ItemGroupId from inventItemGroupItem
+            where inventItemGroupItem.ItemDataAreaId == curExt()
+               && inventItemGroupItem.ItemId         == _itemId;
+
+        return inventItemGroupItem.ItemGroupId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>modelGroupOf</Name>
+				<Source><![CDATA[
+    private InventModelGroupId modelGroupOf(ItemId _itemId)
+    {
+        InventModelGroupItem inventModelGroupItem;
+
+        select firstonly ModelGroupId from inventModelGroupItem
+            where inventModelGroupItem.ItemDataAreaId == curExt()
+               && inventModelGroupItem.ItemId         == _itemId;
+
+        return inventModelGroupItem.ModelGroupId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>storageGroupOf</Name>
+				<Source><![CDATA[
+    private RefRecId storageGroupOf(ItemId _itemId)
+    {
+        EcoResStorageDimensionGroupItem storageGroupItem;
+
+        select firstonly StorageDimensionGroup from storageGroupItem
+            where storageGroupItem.ItemDataAreaId == curExt()
+               && storageGroupItem.ItemId         == _itemId;
+
+        return storageGroupItem.StorageDimensionGroup;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>trackingGroupOf</Name>
+				<Source><![CDATA[
+    private RefRecId trackingGroupOf(ItemId _itemId)
+    {
+        EcoResTrackingDimensionGroupItem trackingGroupItem;
+
+        select firstonly TrackingDimensionGroup from trackingGroupItem
+            where trackingGroupItem.ItemDataAreaId == curExt()
+               && trackingGroupItem.ItemId         == _itemId;
+
+        return trackingGroupItem.TrackingDimensionGroup;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>mcrInventTableOf</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The MCRInventTable row of the item. The standard InventTable.initValue prepares it;
+    /// MD31 writes sell dates only when it exists, so a missing row fails here, not silently.
+    /// </summary>
+    private MCRInventTable mcrInventTableOf(ItemId _itemId)
+    {
+        MCRInventTable mcrInventTable;
+
+        select firstonly mcrInventTable
+            where mcrInventTable.InventTable == InventTable::find(_itemId).RecId;
+
+        this.assertTrue(mcrInventTable.RecId != 0, strFmt('MCRInventTable must exist for item %1', _itemId));
+
+        return mcrInventTable;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

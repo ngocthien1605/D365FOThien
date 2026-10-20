@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12SeedingJob07</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 test case 7 - the full mixed matrix: TWO files x TWO warehouses, one date.
+/// Produces 4 journal groups and therefore 4 counting journals.
+/// This is the case to run with NumOfThreads = 2 to confirm the groups are
+/// distributed across worker tasks, and with the FileName filter set to
+/// TEST_MD12_TC07_A to confirm only that file's 2 groups are picked up.
+/// Requires two warehouses on the configured site.
+/// </summary>
+public final class TEST_MD12SeedingJob07
+{
+    #define.TestCase(7)
+    #define.FileNameA('TEST_MD12_TC07_A')
+    #define.FileNameB('TEST_MD12_TC07_B')
+    #define.ItemsPerGroup(2)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        info(TEST_MD12SeedingJob07::seed());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seed</Name>
+				<Source><![CDATA[
+    public static str seed(SJPMDInventCountingWarehouseId _warehouseA = '',
+                           SJPMDInventCountingWarehouseId _warehouseB = '')
+    {
+        SJPMDInventCountingWarehouseId warehouseA   = TEST_MD12SeedDataHelper::resolveWarehouse(1, _warehouseA);
+        SJPMDInventCountingWarehouseId warehouseB   = TEST_MD12SeedDataHelper::resolveWarehouse(2, _warehouseB);
+        SJPMDInventCountingDate        countingDate = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
+        int                            rows         = 0;
+        int                            purged       = 0;
+
+        if (warehouseA == warehouseB)
+        {
+            throw error(strFmt('TEST_MD12: TC07 needs two DIFFERENT warehouses, both resolved to %1.', warehouseA));
+        }
+
+        ttsbegin;
+        purged += TEST_MD12SeedDataHelper::purgeFileName(#FileNameA);
+        purged += TEST_MD12SeedDataHelper::purgeFileName(#FileNameB);
+
+        rows += TEST_MD12SeedingJob07::seedGroup(#FileNameA, warehouseA, countingDate, 1);
+        rows += TEST_MD12SeedingJob07::seedGroup(#FileNameA, warehouseB, countingDate, 10);
+        rows += TEST_MD12SeedingJob07::seedGroup(#FileNameB, warehouseA, countingDate, 20);
+        rows += TEST_MD12SeedingJob07::seedGroup(#FileNameB, warehouseB, countingDate, 30);
+        ttscommit;
+
+        return strFmt('TC07 | files %1 + %2 x warehouses %3 + %4 | date %5 | 4 groups | %6 rows | expect 4 journals | purged %7',
+                      #FileNameA, #FileNameB, warehouseA, warehouseB, countingDate, rows, purged);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seedGroup</Name>
+				<Source><![CDATA[
+    private static int seedGroup(SJPMDInventCountingFileName    _fileName,
+                                 SJPMDInventCountingWarehouseId _warehouseId,
+                                 SJPMDInventCountingDate        _countingDate,
+                                 int                            _voucherSeed)
+    {
+        SJPMDInventCountingLocationId locationId = TEST_MD12SeedDataHelper::resolveLocation(_warehouseId);
+        container                     items      = TEST_MD12SeedDataHelper::resolveItems(_warehouseId, #ItemsPerGroup);
+        ItemId                        itemId;
+        int                           idx;
+
+        for (idx = 1; idx <= conLen(items); idx++)
+        {
+            itemId = conPeek(items, idx);
+
+            TEST_MD12SeedDataHelper::insertRow(
+                _fileName,
+                _fileName,
+                TEST_MD12SeedDataHelper::voucherNumber(#TestCase, _voucherSeed + idx),
+                _countingDate,
+                _warehouseId,
+                locationId,
+                itemId,
+                TEST_MD12SeedDataHelper::onHandQty(itemId, _warehouseId) + _voucherSeed + idx);
+        }
+
+        return conLen(items);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>
