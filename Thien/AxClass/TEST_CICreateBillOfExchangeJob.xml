@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_CICreateBillOfExchangeJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// CI test data - draws and posts a customer bill of exchange (BOE, Japanese 手形) that settles one invoice.
+/// Uses a journal of type "Customer draw bill of exchange". The line's transaction type is set
+/// to None: the consolidated invoice counts a settling transaction of type None with a bill of
+/// exchange ID as "paid" (CustVendConsInvoice_JP.calcPaidAmountMSTV2).
+/// Not idempotent: every call draws a new bill.
+/// Run: &mi=SysClassRunner&cls=TEST_CICreateBillOfExchangeJob (draws for the default customer's oldest open invoice)
+/// </summary>
+public final class TEST_CICreateBillOfExchangeJob
+{
+    #define.CustAccount('TCI-CUST01')
+    #define.DrawText('TEST_CI bill of exchange draw')
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        CustTrans            invoiceTrans = TEST_CICreatePaymentJob::findOldestOpenInvoice(#CustAccount);
+        CustBillOfExchangeID billId       = TEST_CICreateBillOfExchangeJob::draw(#CustAccount, invoiceTrans.Invoice);
+
+        info(strFmt('TEST_CI: bill of exchange %1 drawn for invoice %2 of customer %3.', billId, invoiceTrans.Invoice, #CustAccount));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>draw</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Draws a bill of exchange of _amount for invoice _invoiceId of _custAccount on _drawDate
+    /// and returns the bill of exchange ID. _amount 0 = the invoice's full open amount.
+    /// _journalName blank = first CustBillOfExchangeDraw journal name with approval and workflow off.
+    /// _paymMode blank = first method of payment with Payment type = Bill of exchange.
+    /// </summary>
+    public static CustBillOfExchangeID draw(
+        CustAccount         _custAccount,
+        InvoiceId           _invoiceId,
+        TransDate           _drawDate    = TEST_CIHelper::today(),
+        AmountCur           _amount      = 0,
+        LedgerJournalNameId _journalName = '',
+        CustPaymMode        _paymMode    = '')
+    {
+        LedgerJournalName  journalName   = TEST_CIHelper::resolveJournalName(LedgerJournalType::CustBillOfExchangeDraw, _journalName);
+        CustPaymModeTable  paymModeTable = TEST_CIHelper::resolveBillOfExchangePaymMode(_paymMode);
+        CustTrans          invoiceTrans  = TEST_CIHelper::findInvoiceCustTrans(_invoiceId, _custAccount);
+        CustTransOpen      invoiceOpen   = TEST_CIHelper::findOpen(invoiceTrans);
+        AmountCur          amount        = _amount ? _amount : invoiceOpen.AmountCur;
+        LedgerJournalTable ledgerJournalTable;
+        LedgerJournalTrans ledgerJournalTrans;
+        CustTrans          billTrans;
+
+        if (amount <= 0 || amount > invoiceOpen.AmountCur || !_drawDate)
+        {
+            throw error(strFmt('TEST_CI: the bill amount must be between 0 and the open amount %1 of invoice %2, and the draw date is required.', invoiceOpen.AmountCur, _invoiceId));
+        }
+
+        ttsbegin;
+
+        ledgerJournalTable = TEST_CIHelper::createJournalHeader(journalName, #DrawText);
+        ledgerJournalTrans = TEST_CIHelper::initJournalLine(ledgerJournalTable, journalName, _custAccount, _drawDate, amount, #DrawText);
+        ledgerJournalTrans.parmOffsetAccount(_custAccount, LedgerJournalACType::Cust);
+        ledgerJournalTrans.Due             = invoiceOpen.DueDate;
+        ledgerJournalTrans.PaymMode        = paymModeTable.PaymMode;
+        ledgerJournalTrans.PaymentStatus   = paymModeTable.PaymStatus;
+        ledgerJournalTrans.PostingProfile  = invoiceTrans.PostingProfile;
+        ledgerJournalTrans.SettleVoucher   = SettlementType::SelectedTransact;
+        ledgerJournalTrans.TransactionType = LedgerTransType::None;
+
+        // insert() creates the bill of exchange header and fills NegInstId.
+        ledgerJournalTrans = TEST_CIHelper::insertJournalLine(ledgerJournalTable, ledgerJournalTrans);
+        TEST_CIHelper::markOpenTrans(ledgerJournalTrans, invoiceTrans, invoiceOpen, amount);
+
+        ttscommit;
+
+        TEST_CIHelper::postJournal(ledgerJournalTable);
+
+        ledgerJournalTrans = LedgerJournalTrans::findRecId(ledgerJournalTrans.RecId, false);
+
+        select firstonly billTrans
+            where billTrans.AccountNum       == _custAccount
+               && billTrans.BillOfExchangeID == ledgerJournalTrans.NegInstId
+               && billTrans.AmountCur        <  0;
+
+        if (!ledgerJournalTrans.NegInstId || !billTrans.RecId)
+        {
+            throw error(strFmt('TEST_CI: journal %1 posted, but no settling customer transaction with a bill of exchange ID was found.', ledgerJournalTable.JournalNum));
+        }
+
+        if (billTrans.TransType != LedgerTransType::None)
+        {
+            warning(strFmt('TEST_CI: bill of exchange %1 was posted with transaction type %2 instead of None; the consolidated invoice may not count it as paid.', ledgerJournalTrans.NegInstId, billTrans.TransType));
+        }
+
+        return ledgerJournalTrans.NegInstId;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

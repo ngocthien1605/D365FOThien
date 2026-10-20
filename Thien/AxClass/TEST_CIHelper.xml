@@ -1,0 +1,523 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_CIHelper</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// CI = Japan consolidated invoice (CustConsInvoice_JP), customer side.
+/// Shared helpers for the TEST_CI* jobs that create test data for it:
+/// prerequisite checks, setup lookups, transaction lookups, and the
+/// ledger journal header/line/mark/post steps used by the payment and
+/// bill of exchange jobs.
+///
+/// Every resolveXxx / findXxx helper fails hard with a message that names
+/// the missing setup or record, so the person running the job knows what to fix.
+/// </summary>
+public final class TEST_CIHelper
+{
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>today</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The session date in the user's time zone. Used as the default document date.
+    /// </summary>
+    public static TransDate today()
+    {
+        return DateTimeUtil::getSystemDate(DateTimeUtil::getUserPreferredTimeZone());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertPrerequisites</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Stops when the consolidated invoice is not usable in the current company:
+    /// the legal entity must be in Japan and CustParameters.CustConsInvoice_JP must be Yes.
+    /// </summary>
+    public static void assertPrerequisites()
+    {
+        if (!CustConsInvoiceType_JP::isCustConsInvoiceEnabled())
+        {
+            throw error(strFmt('TEST_CI: consolidated invoice is not enabled in company %1. The legal entity must be in Japan and Accounts receivable parameters > Consolidated invoice for customer must be Yes.', curExt()));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parseYYYYMMDD</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Converts an 8-character yyyymmdd string (for example 20261020) to a date.
+    /// Returns dateNull() for a blank string; fails for anything else that is not a valid date.
+    /// </summary>
+    public static TransDate parseYYYYMMDD(str _value)
+    {
+        TransDate parsed;
+        str       value = strLTrim(strRTrim(_value));
+
+        if (!value)
+        {
+            return dateNull();
+        }
+
+        if (strLen(value) == 8)
+        {
+            parsed = mkDate(str2Int(subStr(value, 7, 2)), str2Int(subStr(value, 5, 2)), str2Int(subStr(value, 1, 4)));
+        }
+
+        if (!parsed)
+        {
+            throw error(strFmt('TEST_CI: %1 is not a valid date. Use the format yyyymmdd, for example 20261020.', _value));
+        }
+
+        return parsed;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveJournalName</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns the journal name to use for _journalType.
+    /// _override wins when given; otherwise the first journal name of that type
+    /// with approval and workflow switched off (both block direct posting from code).
+    /// </summary>
+    public static LedgerJournalName resolveJournalName(LedgerJournalType _journalType, LedgerJournalNameId _override = '')
+    {
+        LedgerJournalName journalName;
+
+        if (_override)
+        {
+            journalName = LedgerJournalName::find(_override);
+
+            if (!journalName.RecId || journalName.JournalType != _journalType)
+            {
+                throw error(strFmt('TEST_CI: journal name %1 does not exist or is not of type %2.', _override, _journalType));
+            }
+        }
+        else
+        {
+            select firstonly journalName
+                order by JournalName
+                where journalName.JournalType      == _journalType
+                   && journalName.ApproveActive    == NoYes::No
+                   && journalName.WorkflowApproval == NoYes::No;
+
+            if (!journalName.RecId)
+            {
+                throw error(strFmt('TEST_CI: no journal name of type %1 with approval and workflow switched off. Create one in General ledger > Journal setup > Journal names, or pass the journal name.', _journalType));
+            }
+        }
+
+        if (journalName.ApproveActive || journalName.WorkflowApproval)
+        {
+            throw error(strFmt('TEST_CI: journal name %1 has approval or workflow switched on, so it cannot be posted from code. Switch both off or use another journal name.', journalName.JournalName));
+        }
+
+        return journalName;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveBillOfExchangePaymMode</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns the method of payment for a bill of exchange draw.
+    /// _override wins when given; otherwise the first method of payment whose
+    /// Payment type is Bill of exchange. Fails when the result is not of that type.
+    /// </summary>
+    public static CustPaymModeTable resolveBillOfExchangePaymMode(CustPaymMode _override = '')
+    {
+        CustPaymModeTable paymModeTable;
+
+        if (_override)
+        {
+            paymModeTable = CustPaymModeTable::find(_override);
+        }
+        else
+        {
+            select firstonly paymModeTable
+                order by PaymMode
+                where paymModeTable.PaymentType == CustPaymentType::BillOfExchange;
+        }
+
+        if (!paymModeTable.RecId || paymModeTable.PaymentType != CustPaymentType::BillOfExchange)
+        {
+            throw error(strFmt('TEST_CI: no customer method of payment with Payment type = Bill of exchange%1. Create one in Accounts receivable > Payment setup > Methods of payment, or pass it.',
+                               _override ? strFmt(' (method %1 was given)', _override) : ''));
+        }
+
+        if (paymModeTable.PaymOnInvoice)
+        {
+            warning(strFmt('TEST_CI: method of payment %1 has "Create and post draw journal automatically" switched on; invoices paid with it will also draw a bill automatically.', paymModeTable.PaymMode));
+        }
+
+        return paymModeTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findInvoiceCustTrans</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns the customer transaction of invoice _invoiceId for invoice account _custAccount.
+    /// </summary>
+    public static CustTrans findInvoiceCustTrans(InvoiceId _invoiceId, CustAccount _custAccount)
+    {
+        CustTrans custTrans;
+
+        select firstonly custTrans
+            order by RecId desc
+            where custTrans.Invoice    == _invoiceId
+               && custTrans.AccountNum == _custAccount;
+
+        if (!custTrans.RecId)
+        {
+            throw error(strFmt('TEST_CI: no customer transaction for invoice %1 of customer %2.', _invoiceId, _custAccount));
+        }
+
+        return custTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findPaymentCustTrans</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns the credit customer transaction posted with voucher _voucher for _custAccount
+    /// (a payment or the settling side of a bill of exchange draw).
+    /// </summary>
+    public static CustTrans findPaymentCustTrans(Voucher _voucher, CustAccount _custAccount)
+    {
+        CustTrans custTrans;
+
+        select firstonly custTrans
+            order by RecId desc
+            where custTrans.Voucher    == _voucher
+               && custTrans.AccountNum == _custAccount
+               && custTrans.AmountCur  <  0;
+
+        if (!custTrans.RecId)
+        {
+            throw error(strFmt('TEST_CI: no credit customer transaction with voucher %1 for customer %2.', _voucher, _custAccount));
+        }
+
+        return custTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findOpen</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns the open part (CustTransOpen) of _custTrans. Fails when it is already fully settled.
+    /// </summary>
+    public static CustTransOpen findOpen(CustTrans _custTrans)
+    {
+        CustTransOpen custTransOpen = CustTransOpen::findRefId(_custTrans.RecId);
+
+        if (!custTransOpen.RecId)
+        {
+            throw error(strFmt('TEST_CI: customer transaction with voucher %1 (invoice %2) has no open amount; it is already settled.', _custTrans.Voucher, _custTrans.Invoice));
+        }
+
+        return custTransOpen;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>openAmount</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Open amount in transaction currency of invoice _invoiceId; 0 when fully settled.
+    /// </summary>
+    public static AmountCur openAmount(InvoiceId _invoiceId, CustAccount _custAccount)
+    {
+        CustTrans     custTrans     = TEST_CIHelper::findInvoiceCustTrans(_invoiceId, _custAccount);
+        CustTransOpen custTransOpen = CustTransOpen::findRefId(custTrans.RecId);
+
+        return custTransOpen.AmountCur;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertConfirmedHeader</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Stops when _custAccount has no consolidated invoice in a status other than Unconfirmed.
+    /// Payments only count as "paid" on the next consolidated invoice when the paid
+    /// invoices already belong to a confirmed one. Returns the latest confirmed one.
+    /// </summary>
+    public static CustConsInvoice_JP assertConfirmedHeader(CustAccount _custAccount)
+    {
+        CustConsInvoice_JP header = CustConsInvoice_JP::find(CustConsInvoice_JP::findLastConfirmedConsInvoice(_custAccount));
+
+        if (!header.RecId)
+        {
+            throw error(strFmt('TEST_CI: customer %1 has no confirmed consolidated invoice. Create and confirm one in Accounts receivable > Periodic tasks > Consolidated invoice, then run this step again.', _custAccount));
+        }
+
+        return header;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertInvoiceLinked</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Stops when invoice _invoiceId is not linked to a consolidated invoice
+    /// (CustInvoiceJour_W.CustConsInvoice_JP), or is linked to an Unconfirmed one
+    /// (standard blocks settlement of such invoices). Returns the consolidation ID.
+    /// </summary>
+    public static CustConsId_JP assertInvoiceLinked(InvoiceId _invoiceId, CustAccount _custAccount)
+    {
+        CustInvoiceJour    custInvoiceJour;
+        CustInvoiceJour_W  custInvoiceJourW;
+        CustConsInvoice_JP header;
+
+        select firstonly RecId from custInvoiceJour
+            where custInvoiceJour.InvoiceId      == _invoiceId
+               && custInvoiceJour.InvoiceAccount == _custAccount
+            join CustConsInvoice_JP from custInvoiceJourW
+                where custInvoiceJourW.CustInvoiceJour == custInvoiceJour.RecId;
+
+        header = CustConsInvoice_JP::find(custInvoiceJourW.CustConsInvoice_JP);
+
+        if (!header.RecId)
+        {
+            throw error(strFmt('TEST_CI: invoice %1 is not in any consolidated invoice. Create the consolidated invoice for customer %2 first.', _invoiceId, _custAccount));
+        }
+
+        if (header.Status == CustVendConsInvoiceStatus_JP::Unconfirmed)
+        {
+            throw error(strFmt('TEST_CI: invoice %1 is in consolidated invoice %2, which is still Unconfirmed. Confirm it first; standard blocks settlement of its invoices.', _invoiceId, header.ConsId));
+        }
+
+        return header.ConsId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>openInvoicesOfHeader</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns, oldest invoice date first, the IDs of positive invoices linked to
+    /// consolidated invoice _headerRecId that still have an open amount.
+    /// Credit notes are skipped.
+    /// </summary>
+    public static container openInvoicesOfHeader(RecId _headerRecId)
+    {
+        CustInvoiceJour   custInvoiceJour;
+        CustInvoiceJour_W custInvoiceJourW;
+        container         invoices;
+
+        while select InvoiceId, InvoiceAccount from custInvoiceJour
+            order by InvoiceDate, InvoiceId
+            where custInvoiceJour.InvoiceAmount > 0
+            exists join custInvoiceJourW
+                where custInvoiceJourW.CustInvoiceJour    == custInvoiceJour.RecId
+                   && custInvoiceJourW.CustConsInvoice_JP == _headerRecId
+        {
+            if (TEST_CIHelper::openAmount(custInvoiceJour.InvoiceId, custInvoiceJour.InvoiceAccount) > 0)
+            {
+                invoices += [custInvoiceJour.InvoiceId];
+            }
+        }
+
+        return invoices;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournalHeader</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Inserts a ledger journal header for _journalName. Call inside a transaction.
+    /// </summary>
+    public static LedgerJournalTable createJournalHeader(LedgerJournalName _journalName, Description _description)
+    {
+        LedgerJournalTable ledgerJournalTable;
+
+        ledgerJournalTable.clear();
+        ledgerJournalTable.initValue();
+        ledgerJournalTable.JournalName = _journalName.JournalName;
+        ledgerJournalTable.initFromLedgerJournalName();
+        ledgerJournalTable.JournalNum  = JournalTableData::newTable(ledgerJournalTable).nextJournalId();
+        ledgerJournalTable.Name        = _description;
+        ledgerJournalTable.insert();
+
+        return ledgerJournalTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initJournalLine</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Prepares (does not insert) a credit line on customer _custAccount in journal _ledgerJournalTable,
+    /// defaulted the way the journal form does it (LedgerJournalEngine), with transaction date
+    /// _transDate and a voucher from the journal name unless it allocates vouchers at posting.
+    /// The caller sets the journal-type specific fields and then calls insertJournalLine.
+    /// </summary>
+    public static LedgerJournalTrans initJournalLine(
+        LedgerJournalTable    _ledgerJournalTable,
+        LedgerJournalName     _journalName,
+        CustAccount           _custAccount,
+        TransDate             _transDate,
+        AmountCur             _amountCredit,
+        LedgerJournalTransTxt _text)
+    {
+        LedgerJournalEngine ledgerJournalEngine = LedgerJournalEngine::construct(_ledgerJournalTable.JournalType);
+        LedgerJournalTrans  ledgerJournalTrans;
+        NumberSeq           voucherNumberSeq;
+
+        ledgerJournalEngine.newJournalActive(_ledgerJournalTable);
+
+        ledgerJournalTrans.clear();
+        ledgerJournalTrans.initValue();
+        ledgerJournalTrans.JournalNum = _ledgerJournalTable.JournalNum;
+        ledgerJournalEngine.initValue(ledgerJournalTrans);
+        ledgerJournalTrans.JournalNum = _ledgerJournalTable.JournalNum;
+        ledgerJournalTrans.LineNum    = 1;
+
+        ledgerJournalTrans.parmAccount(_custAccount, LedgerJournalACType::Cust);
+        ledgerJournalTrans.modifiedField(fieldNum(LedgerJournalTrans, LedgerDimension));
+
+        // LedgerJournalEngine.initValue resets the date to today, so set it afterwards.
+        ledgerJournalTrans.TransDate       = _transDate;
+        ledgerJournalTrans.DocumentDate    = _transDate;
+        ledgerJournalTrans.Txt             = _text;
+        ledgerJournalTrans.AmountCurDebit  = 0;
+        ledgerJournalTrans.AmountCurCredit = _amountCredit;
+
+        if (!_journalName.VoucherAllocatedAtPosting)
+        {
+            voucherNumberSeq = NumberSeq::newGetVoucherFromId(_journalName.NumberSequenceTable);
+            ledgerJournalTrans.Voucher = voucherNumberSeq.voucher();
+            voucherNumberSeq.used();
+        }
+
+        return ledgerJournalTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>insertJournalLine</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Defaults the offset dimensions and inserts _ledgerJournalTrans. Call inside a transaction.
+    /// </summary>
+    public static LedgerJournalTrans insertJournalLine(LedgerJournalTable _ledgerJournalTable, LedgerJournalTrans _ledgerJournalTrans)
+    {
+        LedgerJournalEngine ledgerJournalEngine = LedgerJournalEngine::construct(_ledgerJournalTable.JournalType);
+
+        ledgerJournalEngine.newJournalActive(_ledgerJournalTable);
+        ledgerJournalEngine.initOffsetDefaultDimension(_ledgerJournalTrans);
+        _ledgerJournalTrans.insert();
+
+        return _ledgerJournalTrans;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>markOpenTrans</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Marks open invoice _custTransOpen for settlement by journal line _ledgerJournalTrans
+    /// (amount _settleAmount, positive), the same way standard
+    /// CreditCardPaymentJournal.settlePayment does. The line must already be inserted.
+    /// Call inside a transaction.
+    /// </summary>
+    public static void markOpenTrans(
+        LedgerJournalTrans _ledgerJournalTrans,
+        CustTrans          _custTrans,
+        CustTransOpen      _custTransOpen,
+        AmountCur          _settleAmount)
+    {
+        SpecTransManager   specTransManager;
+        LedgerJournalTrans ledgerJournalTrans;
+
+        if (!_ledgerJournalTrans.RecId)
+        {
+            throw error('TEST_CI: the journal line must be inserted before an invoice can be marked.');
+        }
+
+        specTransManager = SpecTransManager::newFromSpec(_ledgerJournalTrans);
+        specTransManager.insert(
+            _custTransOpen.DataAreaId,
+            _custTransOpen.TableId,
+            _custTransOpen.RecId,
+            _settleAmount,
+            _custTrans.CurrencyCode);
+
+        ledgerJournalTrans = LedgerJournalTrans::findRecId(_ledgerJournalTrans.RecId, true);
+        ledgerJournalTrans.MarkedInvoice        = _custTrans.Invoice;
+        ledgerJournalTrans.MarkedInvoiceCompany = _custTrans.company();
+        ledgerJournalTrans.MarkedInvoiceRecId   = _custTransOpen.RecId;
+        ledgerJournalTrans.SettleVoucher        = SettlementType::SelectedTransact;
+        ledgerJournalTrans.update();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postJournal</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Posts ledger journal _ledgerJournalTable. Call outside a transaction.
+    /// Fails when the journal is still unposted afterwards.
+    /// </summary>
+    public static void postJournal(LedgerJournalTable _ledgerJournalTable)
+    {
+        LedgerJournalCheckPost ledgerJournalCheckPost = LedgerJournalCheckPost::newLedgerJournalTable(_ledgerJournalTable, NoYes::Yes);
+
+        ledgerJournalCheckPost.run();
+
+        if (!LedgerJournalTable::find(_ledgerJournalTable.JournalNum).Posted)
+        {
+            throw error(strFmt('TEST_CI: journal %1 was not posted. See the messages above.', _ledgerJournalTable.JournalNum));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postedVoucher</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Voucher of journal line _lineRecId after posting (filled at posting when the
+    /// journal name allocates vouchers at posting).
+    /// </summary>
+    public static Voucher postedVoucher(RecId _lineRecId)
+    {
+        LedgerJournalTrans ledgerJournalTrans;
+
+        select firstonly Voucher from ledgerJournalTrans
+            where ledgerJournalTrans.RecId == _lineRecId;
+
+        return ledgerJournalTrans.Voucher;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

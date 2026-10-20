@@ -1,0 +1,334 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_CIScenarioOrchestrator</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// CI test data - runs the Japan consolidated invoice test scenario step by step.
+/// Test IDs (C01, T02, A01 ...) refer to section 11 of
+/// C:\.tmp\Projects\DCHJ_ConsolidatedInvoice\ConsolidatedInvoice_JP_Flow.md.
+///
+/// Run with SysClassRunner and the step in the args URL parameter:
+///   &mi=SysClassRunner&cls=TEST_CIScenarioOrchestrator&args=step1;20261020
+///   step1 [;consolidation date yyyymmdd] - master data + period-1 invoices
+///   step2 [;payment date yyyymmdd]       - payments, bill of exchange, settlement, period-2 invoices
+///   step3 [;payment date yyyymmdd]       - late payment for the older consolidated invoice (A05)
+///   edge  [;any date in the month yyyymmdd] - consolidation day 31 customer (C04/C05)
+/// Consolidated invoice create / confirm / post are manual steps between the runs.
+/// Master data is idempotent; every run of a step creates new transactions.
+/// Every value below is a default; call the step methods with parameters to override them.
+/// </summary>
+public final class TEST_CIScenarioOrchestrator
+{
+    #define.CustAccount('TCI-CUST01')
+    #define.CustAccount31('TCI-CUST31')
+    #define.CustName31('TEST_CI consolidation day 31 customer')
+    #define.ItemId('TCI-ITEM01')
+    #define.ConsDay(20)
+    #define.UnitPrice(1005)
+    #define.Qty(1)
+    #define.MinOnHand(1000)
+    #define.CostPrice(500)
+    #define.Warehouse('001000')
+    #define.PartialShare(0.5)
+    #define.SettleShare(0.25)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        URLUtility urlUtility = new URLUtility();
+        container  argsCon    = str2con(urlUtility.getQueryParamValue('args'), ';', false);
+        str        step       = strLwr(strLTrim(strRTrim(conLen(argsCon) >= 1 ? conPeek(argsCon, 1) : '')));
+        TransDate  argDate    = TEST_CIHelper::parseYYYYMMDD(conLen(argsCon) >= 2 ? conPeek(argsCon, 2) : '');
+
+        switch (step)
+        {
+            case '':
+            case 'step1':
+                TEST_CIScenarioOrchestrator::step1_MasterAndPeriod1(argDate);
+                break;
+
+            case 'step2':
+                TEST_CIScenarioOrchestrator::step2_PaymentsAfterConfirm(argDate);
+                break;
+
+            case 'step3':
+                TEST_CIScenarioOrchestrator::step3_LatePaymentForOlderHeader(argDate);
+                break;
+
+            case 'edge':
+                TEST_CIScenarioOrchestrator::stepEdge_ShortMonth(argDate);
+                break;
+
+            default:
+                throw error(strFmt('TEST_CI: unknown step "%1". Use args=step1, step2, step3 or edge, optionally followed by ;yyyymmdd.', step));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>step1_MasterAndPeriod1</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Creates the customer and item, then the period-1 documents around consolidation date
+    /// _consDate (blank = the customer's current consolidation period end).
+    /// </summary>
+    public static void step1_MasterAndPeriod1(
+        TransDate      _consDate     = dateNull(),
+        CustAccount    _custAccount  = #CustAccount,
+        ItemId         _itemId       = #ItemId,
+        CustConsDay_JP _consDay      = #ConsDay,
+        SalesPrice     _unitPrice    = #UnitPrice,
+        TaxItemGroup   _taxItemGroup = '')
+    {
+        CustAccount custAccount;
+        ItemId      itemId;
+        TransDate   consDate;
+        InvoiceId   inv1, inv2, inv3, invNext, creditNote, notTarget, freeText;
+
+        TEST_CIHelper::assertPrerequisites();
+
+        custAccount = TEST_CICreateCustomerJob::ensureCustomer(_custAccount, '', _consDay);
+        itemId      = TEST_CICreateItemJob::ensureItem(_itemId, #MinOnHand, #CostPrice, #Warehouse, _taxItemGroup);
+        consDate    = _consDate ? _consDate : CustVendConsInvoiceType_JP::getCurrentConsPeriodEndDate(custAccount, CustVendACType::Cust, TEST_CIHelper::today());
+
+        if (!consDate)
+        {
+            throw error(strFmt('TEST_CI: no consolidation date could be derived for customer %1. Pass one: args=step1;yyyymmdd.', custAccount));
+        }
+
+        inv1       = TEST_CICreateSalesInvoiceJob::createAndPost(custAccount, itemId, consDate - 20, #Qty, _unitPrice, NoYes::Yes, false, _taxItemGroup);
+        inv2       = TEST_CICreateSalesInvoiceJob::createAndPost(custAccount, itemId, consDate - 10, #Qty, _unitPrice, NoYes::Yes, false, _taxItemGroup);
+        inv3       = TEST_CICreateSalesInvoiceJob::createAndPost(custAccount, itemId, consDate,      #Qty, _unitPrice, NoYes::Yes, false, _taxItemGroup);
+        invNext    = TEST_CICreateSalesInvoiceJob::createAndPost(custAccount, itemId, consDate + 1,  #Qty, _unitPrice, NoYes::Yes, false, _taxItemGroup);
+        creditNote = TEST_CICreateSalesInvoiceJob::createCreditNote(custAccount, itemId, consDate - 3, #Qty, _unitPrice, NoYes::Yes, _taxItemGroup);
+        notTarget  = TEST_CICreateSalesInvoiceJob::createAndPost(custAccount, itemId, consDate - 2,  #Qty, _unitPrice, NoYes::No, false, _taxItemGroup);
+        freeText   = TEST_CICreateFreeTextInvoiceJob::createAndPost(custAccount, consDate - 1, _unitPrice, '', _taxItemGroup);
+
+        info(strFmt('TEST_CI step1 | customer %1 | item %2 | consolidation date %3', custAccount, itemId, consDate));
+        info(strFmt('  C01 / T02 included: %1 (%2), %3 (%4), %5 (%6, on the consolidation date)', inv1, consDate - 20, inv2, consDate - 10, inv3, consDate));
+        info(strFmt('  C01 excluded, next period: %1 (%2)', invNext, consDate + 1));
+        info(strFmt('  C14 credit note, included: %1 (%2)', creditNote, consDate - 3));
+        info(strFmt('  S05 not a consolidation target, excluded: %1 (%2)', notTarget, consDate - 2));
+        info(strFmt('  S06 free text invoice, excluded: %1 (%2)', freeText, consDate - 1));
+        info(strFmt('Next: Accounts receivable > Periodic tasks > Consolidated invoice > New, execution date %1, filter customer %2. Expect %3, %4, %5 and %6 linked and the others not. Then Confirm (optionally Post for T02) and run args=step2.',
+                    consDate + 1, custAccount, inv1, inv2, inv3, creditNote));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>step2_PaymentsAfterConfirm</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Pays the open invoices of the customer's latest confirmed consolidated invoice:
+    /// first in full (A01), second partly (A02) plus an unmarked payment settled afterwards
+    /// with TEST_CISettleTransJob, third with a bill of exchange (A06). Then posts two
+    /// invoices in the next period. _paymentDate blank = today, or the day after the
+    /// consolidation date when that is later.
+    /// </summary>
+    public static void step2_PaymentsAfterConfirm(
+        TransDate    _paymentDate  = dateNull(),
+        CustAccount  _custAccount  = #CustAccount,
+        ItemId       _itemId       = #ItemId,
+        SalesPrice   _unitPrice    = #UnitPrice,
+        TaxItemGroup _taxItemGroup = '',
+        real         _partialShare = #PartialShare,
+        real         _settleShare  = #SettleShare)
+    {
+        CustConsInvoice_JP   header;
+        container            openInvoices;
+        InvoiceId            invFull, invPartial, invBill, invNext1, invNext2;
+        TransDate            paymentDate;
+        AmountCur            fullAmount, partialAmount, settleAmount, billAmount;
+        Voucher              voucherFull, voucherPartial, voucherUnmarked;
+        CustBillOfExchangeID billId;
+        ItemId               itemId;
+
+        TEST_CIHelper::assertPrerequisites();
+
+        header       = TEST_CIHelper::assertConfirmedHeader(_custAccount);
+        openInvoices = TEST_CIHelper::openInvoicesOfHeader(header.RecId);
+
+        if (conLen(openInvoices) < 3)
+        {
+            throw error(strFmt('TEST_CI: consolidated invoice %1 has %2 open invoice(s); step2 needs 3. Run step1 and create and confirm a new consolidated invoice first.', header.ConsId, conLen(openInvoices)));
+        }
+
+        invFull    = conPeek(openInvoices, 1);
+        invPartial = conPeek(openInvoices, 2);
+        invBill    = conPeek(openInvoices, 3);
+
+        TEST_CIHelper::assertInvoiceLinked(invFull, _custAccount);
+        TEST_CIHelper::assertInvoiceLinked(invPartial, _custAccount);
+        TEST_CIHelper::assertInvoiceLinked(invBill, _custAccount);
+
+        paymentDate = _paymentDate ? _paymentDate : TEST_CIHelper::today();
+
+        if (!_paymentDate && paymentDate <= header.ConsDate)
+        {
+            paymentDate = header.ConsDate + 1;
+        }
+
+        itemId = TEST_CICreateItemJob::ensureItem(_itemId, #MinOnHand, #CostPrice, #Warehouse, _taxItemGroup);
+
+        fullAmount     = TEST_CIHelper::openAmount(invFull, _custAccount);
+        voucherFull    = TEST_CICreatePaymentJob::createAndPost(_custAccount, fullAmount, paymentDate, invFull);
+
+        partialAmount  = roundDown(TEST_CIHelper::openAmount(invPartial, _custAccount) * _partialShare, 1);
+        settleAmount   = roundDown(TEST_CIHelper::openAmount(invPartial, _custAccount) * _settleShare, 1);
+        voucherPartial = TEST_CICreatePaymentJob::createAndPost(_custAccount, partialAmount, paymentDate, invPartial);
+
+        // On a rerun the invoice may already be partly paid: never settle more than is still open.
+        settleAmount = min(settleAmount, TEST_CIHelper::openAmount(invPartial, _custAccount));
+
+        if (settleAmount <= 0)
+        {
+            throw error(strFmt('TEST_CI: invoice %1 has no open amount left for the settlement test. Run step1 and create and confirm a new consolidated invoice first.', invPartial));
+        }
+
+        voucherUnmarked = TEST_CICreatePaymentJob::createAndPost(_custAccount, settleAmount, paymentDate);
+        TEST_CISettleTransJob::settle(_custAccount, voucherUnmarked, invPartial, settleAmount);
+
+        billAmount = TEST_CIHelper::openAmount(invBill, _custAccount);
+        billId     = TEST_CICreateBillOfExchangeJob::draw(_custAccount, invBill, paymentDate, billAmount);
+
+        invNext1 = TEST_CICreateSalesInvoiceJob::createAndPost(_custAccount, itemId, header.ConsDate + 5,  #Qty, _unitPrice, NoYes::Yes, false, _taxItemGroup);
+        invNext2 = TEST_CICreateSalesInvoiceJob::createAndPost(_custAccount, itemId, header.ConsDate + 10, #Qty, _unitPrice, NoYes::Yes, false, _taxItemGroup);
+
+        info(strFmt('TEST_CI step2 | customer %1 | paid against consolidated invoice %2 (dated %3) on %4', _custAccount, header.ConsId, header.ConsDate, paymentDate));
+        info(strFmt('  A01 full payment %1 = %2 for invoice %3', voucherFull, fullAmount, invFull));
+        info(strFmt('  A02 partial payment %1 = %2 for invoice %3, plus unmarked payment %4 = %5 settled by TEST_CISettleTransJob', voucherPartial, partialAmount, invPartial, voucherUnmarked, settleAmount));
+        info(strFmt('  A06 bill of exchange %1 = %2 for invoice %3', billId, billAmount, invBill));
+        info(strFmt('  next-period invoices: %1 (%2), %3 (%4)', invNext1, header.ConsDate + 5, invNext2, header.ConsDate + 10));
+        info(strFmt('Next: check consolidated invoice %1 status is PartiallySettled. Create consolidated invoice 2 with execution date %2: expect previous amount = total of %1, paid amount = %3 (all of the above), invoices %4 and %5 linked. Then Confirm and optionally run args=step3.',
+                    header.ConsId, nextMth(header.ConsDate), fullAmount + partialAmount + settleAmount + billAmount, invNext1, invNext2));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>step3_LatePaymentForOlderHeader</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// After consolidated invoice 2 is confirmed: pays an invoice that is still open in the
+    /// older consolidated invoice 1 (open point A05: such a payment may be counted on no header).
+    /// </summary>
+    public static void step3_LatePaymentForOlderHeader(
+        TransDate   _paymentDate = dateNull(),
+        CustAccount _custAccount = #CustAccount)
+    {
+        CustConsInvoice_JP latest;
+        CustConsInvoice_JP previous;
+        container          openInvoices;
+        InvoiceId          invoiceId;
+        AmountCur          amount;
+        Voucher            voucher;
+        TransDate          paymentDate;
+
+        TEST_CIHelper::assertPrerequisites();
+
+        latest   = TEST_CIHelper::assertConfirmedHeader(_custAccount);
+        previous = CustConsInvoice_JP::find(latest.CustConsInvoice_JP);
+
+        if (!previous.RecId)
+        {
+            throw error(strFmt('TEST_CI: step3 needs two confirmed consolidated invoices for customer %1; only %2 is confirmed. Confirm consolidated invoice 2 first.', _custAccount, latest.ConsId));
+        }
+
+        openInvoices = TEST_CIHelper::openInvoicesOfHeader(previous.RecId);
+
+        if (!conLen(openInvoices))
+        {
+            throw error(strFmt('TEST_CI: consolidated invoice %1 has no open invoice left to pay late.', previous.ConsId));
+        }
+
+        invoiceId   = conPeek(openInvoices, 1);
+        amount      = TEST_CIHelper::openAmount(invoiceId, _custAccount);
+        paymentDate = _paymentDate ? _paymentDate : TEST_CIHelper::today();
+
+        if (!_paymentDate && paymentDate <= latest.ConsDate)
+        {
+            paymentDate = latest.ConsDate + 1;
+        }
+
+        TEST_CIHelper::assertInvoiceLinked(invoiceId, _custAccount);
+        voucher = TEST_CICreatePaymentJob::createAndPost(_custAccount, amount, paymentDate, invoiceId);
+
+        info(strFmt('TEST_CI step3 | A05 late payment %1 = %2 on %3 for invoice %4 of older consolidated invoice %5 (latest confirmed is %6).', voucher, amount, paymentDate, invoiceId, previous.ConsId, latest.ConsId));
+        info(strFmt('Next: create consolidated invoice 3 with execution date %1 and check whether %2 appears as paid. The code suggests it is not counted on any consolidated invoice (flow doc A05).', nextMth(latest.ConsDate), amount));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>stepEdge_ShortMonth</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Creates a customer with consolidation day 31 and two invoices at the end of a 31-day month
+    /// (the latest one on or before _anyDate, blank = today), for the short-month checks C04/C05.
+    /// </summary>
+    public static void stepEdge_ShortMonth(
+        TransDate    _anyDate      = dateNull(),
+        CustAccount  _custAccount  = #CustAccount31,
+        ItemId       _itemId       = #ItemId,
+        SalesPrice   _unitPrice    = #UnitPrice,
+        TaxItemGroup _taxItemGroup = '')
+    {
+        CustAccount custAccount;
+        ItemId      itemId;
+        TransDate   monthEnd;
+        TransDate   probe;
+        TransDate   emptyRunDate;
+        InvoiceId   invBefore, invOnEnd;
+        int         guard;
+
+        TEST_CIHelper::assertPrerequisites();
+
+        custAccount = TEST_CICreateCustomerJob::ensureCustomer(_custAccount, #CustName31, 31);
+        itemId      = TEST_CICreateItemJob::ensureItem(_itemId, #MinOnHand, #CostPrice, #Warehouse, _taxItemGroup);
+
+        // Latest month end with 31 days on or before the given date.
+        monthEnd = endMth(_anyDate ? _anyDate : TEST_CIHelper::today());
+
+        if (monthEnd > (_anyDate ? _anyDate : TEST_CIHelper::today()))
+        {
+            monthEnd = endMth(prevMth(monthEnd));
+        }
+
+        while (dayOfMth(monthEnd) != 31 && guard < 12)
+        {
+            monthEnd = endMth(prevMth(monthEnd));
+            guard++;
+        }
+
+        // An execution date that gives no consolidation date: day 15 of a month whose previous month has fewer than 31 days.
+        probe = endMth(nextMth(monthEnd));
+        guard = 0;
+
+        while (dayOfMth(probe) == 31 && guard < 12)
+        {
+            probe = endMth(nextMth(probe));
+            guard++;
+        }
+
+        emptyRunDate = mkDate(15, mthOfYr(nextMth(probe)), year(nextMth(probe)));
+
+        invBefore = TEST_CICreateSalesInvoiceJob::createAndPost(custAccount, itemId, monthEnd - 1, #Qty, _unitPrice, NoYes::Yes, false, _taxItemGroup);
+        invOnEnd  = TEST_CICreateSalesInvoiceJob::createAndPost(custAccount, itemId, monthEnd,     #Qty, _unitPrice, NoYes::Yes, false, _taxItemGroup);
+
+        info(strFmt('TEST_CI edge | customer %1 with consolidation day 31 | invoices %2 (%3) and %4 (%5)', custAccount, invBefore, monthEnd - 1, invOnEnd, monthEnd));
+        info(strFmt('  C04/C05: creating the consolidated invoice for %1 with execution date %2 should create nothing and show no message (the period end becomes an invalid date).', custAccount, emptyRunDate));
+        info(strFmt('  Control: with execution date %1 expect one consolidated invoice dated %1 containing both invoices.', monthEnd));
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_CICreateItemJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// CI test data - makes sure the test item exists, is released and has stock.
+/// Idempotent: creates the item only when it does not exist and posts a movement
+/// journal only for the quantity missing up to _minOnHand.
+/// Reuses TEST_CreateReleasedProductJob and TEST_CreateAndPostMovementJournalJob.
+/// Run: &mi=SysClassRunner&cls=TEST_CICreateItemJob
+/// </summary>
+public final class TEST_CICreateItemJob
+{
+    #define.ItemId('TCI-ITEM01')
+    #define.MinOnHand(1000)
+    #define.CostPrice(500)
+    #define.Warehouse('001000')
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        ItemId itemId = TEST_CICreateItemJob::ensureItem();
+
+        info(strFmt('TEST_CI: item %1 is ready, on-hand %2 in warehouse %3.', itemId, TEST_CICreateItemJob::onHandQty(itemId, #Warehouse), #Warehouse));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ensureItem</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns item _itemId after creating it when needed, setting its sales item tax group
+    /// when _taxItemGroup is given, and topping up stock in _warehouse to _minOnHand.
+    /// </summary>
+    public static ItemId ensureItem(
+        ItemId           _itemId       = #ItemId,
+        Qty              _minOnHand    = #MinOnHand,
+        CostAmount       _costPrice    = #CostPrice,
+        InventLocationId _warehouse    = #Warehouse,
+        TaxItemGroup     _taxItemGroup = '')
+    {
+        ItemId            itemId = _itemId;
+        InventTableModule salesModule;
+        Qty               onHand;
+
+        if (!InventTable::find(itemId).RecId)
+        {
+            itemId = TEST_CreateReleasedProductJob::createReleasedProduct(itemId);
+        }
+
+        if (_taxItemGroup)
+        {
+            ttsbegin;
+            salesModule = InventTableModule::find(itemId, ModuleInventPurchSales::Sales, true);
+
+            if (!salesModule.RecId)
+            {
+                throw error(strFmt('TEST_CI: item %1 has no sales setup (InventTableModule).', itemId));
+            }
+
+            salesModule.TaxItemGroupId = _taxItemGroup;
+            salesModule.update();
+            ttscommit;
+        }
+
+        onHand = TEST_CICreateItemJob::onHandQty(itemId, _warehouse);
+
+        if (onHand < _minOnHand)
+        {
+            TEST_CreateAndPostMovementJournalJob::createAndPostForItem(itemId, _minOnHand - onHand, _costPrice, _warehouse);
+        }
+
+        return itemId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>onHandQty</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Physical on-hand of _itemId in _warehouse, summed over all other dimensions.
+    /// </summary>
+    public static Qty onHandQty(ItemId _itemId, InventLocationId _warehouse)
+    {
+        InventSum inventSum;
+        InventDim inventDim;
+
+        select sum(PhysicalInvent) from inventSum
+            where inventSum.ItemId == _itemId
+            exists join inventDim
+                where inventDim.InventDimId      == inventSum.InventDimId
+                   && inventDim.InventLocationId == _warehouse;
+
+        return inventSum.PhysicalInvent;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

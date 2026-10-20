@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_CICreatePaymentJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// CI test data - creates and posts a customer payment journal with one line,
+/// optionally marking an invoice for settlement.
+/// Payments only count as "paid" on the next consolidated invoice when the marked
+/// invoice is already in a confirmed consolidated invoice; standard also blocks
+/// settling an invoice that is in an Unconfirmed one.
+/// Not idempotent: every call posts a new payment.
+/// Run: &mi=SysClassRunner&cls=TEST_CICreatePaymentJob (pays the default customer's oldest open invoice in full)
+/// </summary>
+public final class TEST_CICreatePaymentJob
+{
+    #define.CustAccount('TCI-CUST01')
+    #define.PaymentText('TEST_CI customer payment')
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        CustTrans invoiceTrans = TEST_CICreatePaymentJob::findOldestOpenInvoice(#CustAccount);
+        AmountCur amount       = TEST_CIHelper::findOpen(invoiceTrans).AmountCur;
+        Voucher   voucher      = TEST_CICreatePaymentJob::createAndPost(#CustAccount, amount, TEST_CIHelper::today(), invoiceTrans.Invoice);
+
+        info(strFmt('TEST_CI: payment %1 of %2 posted for customer %3, marked to invoice %4.', voucher, amount, #CustAccount, invoiceTrans.Invoice));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createAndPost</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Posts a payment of _amount (positive) from _custAccount on _paymentDate and returns its voucher.
+    /// _markInvoiceId: invoice to mark for settlement (blank = no marking; settle later with TEST_CISettleTransJob).
+    /// The marked amount is the smaller of _amount and the invoice's open amount.
+    /// _journalName blank = first CustPayment journal name with approval and workflow off.
+    /// _paymMode blank = the method of payment defaulted from the customer.
+    /// _offsetAccount blank = the offset account of the journal name.
+    /// </summary>
+    public static Voucher createAndPost(
+        CustAccount         _custAccount,
+        AmountCur           _amount,
+        TransDate           _paymentDate       = TEST_CIHelper::today(),
+        InvoiceId           _markInvoiceId     = '',
+        LedgerJournalNameId _journalName       = '',
+        CustPaymMode        _paymMode          = '',
+        LedgerJournalAC     _offsetAccount     = '',
+        LedgerJournalACType _offsetAccountType = LedgerJournalACType::Bank)
+    {
+        LedgerJournalName  journalName;
+        LedgerJournalTable ledgerJournalTable;
+        LedgerJournalTrans ledgerJournalTrans;
+        CustTrans          invoiceTrans;
+        CustTransOpen      invoiceOpen;
+
+        if (!CustTable::find(_custAccount).RecId)
+        {
+            throw error(strFmt('TEST_CI: customer %1 does not exist.', _custAccount));
+        }
+
+        if (_amount <= 0 || !_paymentDate)
+        {
+            throw error('TEST_CI: the payment amount must be positive and the payment date is required.');
+        }
+
+        journalName = TEST_CIHelper::resolveJournalName(LedgerJournalType::CustPayment, _journalName);
+
+        if (_markInvoiceId)
+        {
+            invoiceTrans = TEST_CIHelper::findInvoiceCustTrans(_markInvoiceId, _custAccount);
+            invoiceOpen  = TEST_CIHelper::findOpen(invoiceTrans);
+        }
+
+        ttsbegin;
+
+        ledgerJournalTable = TEST_CIHelper::createJournalHeader(journalName, #PaymentText);
+        ledgerJournalTrans = TEST_CIHelper::initJournalLine(ledgerJournalTable, journalName, _custAccount, _paymentDate, _amount, #PaymentText);
+        ledgerJournalTrans.TransactionType = LedgerTransType::Payment;
+        ledgerJournalTrans.PaymentStatus   = CustVendPaymStatus::Confirmed;
+
+        if (_paymMode)
+        {
+            ledgerJournalTrans.PaymMode = _paymMode;
+        }
+
+        if (_offsetAccount)
+        {
+            ledgerJournalTrans.parmOffsetAccount(_offsetAccount, _offsetAccountType);
+            ledgerJournalTrans.modifiedField(fieldNum(LedgerJournalTrans, OffsetLedgerDimension));
+        }
+
+        if (!ledgerJournalTrans.OffsetLedgerDimension)
+        {
+            throw error(strFmt('TEST_CI: the payment has no offset account. Set an offset account on journal name %1 or pass one.', journalName.JournalName));
+        }
+
+        ledgerJournalTrans = TEST_CIHelper::insertJournalLine(ledgerJournalTable, ledgerJournalTrans);
+
+        if (invoiceOpen.RecId)
+        {
+            TEST_CIHelper::markOpenTrans(ledgerJournalTrans, invoiceTrans, invoiceOpen, min(_amount, invoiceOpen.AmountCur));
+        }
+
+        ttscommit;
+
+        TEST_CIHelper::postJournal(ledgerJournalTable);
+
+        return TEST_CIHelper::postedVoucher(ledgerJournalTrans.RecId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findOldestOpenInvoice</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The open invoice transaction of _custAccount with the oldest date.
+    /// </summary>
+    public static CustTrans findOldestOpenInvoice(CustAccount _custAccount)
+    {
+        CustTrans     custTrans;
+        CustTransOpen custTransOpen;
+
+        select firstonly custTrans
+            order by TransDate, RecId
+            where custTrans.AccountNum == _custAccount
+               && custTrans.Invoice    != ''
+               && custTrans.AmountCur  >  0
+            exists join custTransOpen
+                where custTransOpen.RefRecId == custTrans.RecId;
+
+        if (!custTrans.RecId)
+        {
+            throw error(strFmt('TEST_CI: customer %1 has no open invoice.', _custAccount));
+        }
+
+        return custTrans;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

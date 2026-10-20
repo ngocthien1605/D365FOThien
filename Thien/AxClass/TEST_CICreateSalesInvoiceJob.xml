@@ -1,0 +1,228 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_CICreateSalesInvoiceJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// CI test data - creates a one-line sales order and posts its invoice on a given date,
+/// with a fixed unit price and an explicit ConsTarget_JP ("Target of consolidation").
+/// A negative quantity gives a credit note (createCreditNote).
+/// Not idempotent: every call creates a new order and invoice.
+/// Run: &mi=SysClassRunner&cls=TEST_CICreateSalesInvoiceJob (default customer, item, today)
+/// </summary>
+public final class TEST_CICreateSalesInvoiceJob
+{
+    #define.Qty(1)
+    #define.UnitPrice(1005)
+    #define.Warehouse('001000')
+    #define.CustomerRef('TEST_CI')
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        CustAccount custAccount = TEST_CICreateCustomerJob::ensureCustomer();
+        ItemId      itemId      = TEST_CICreateItemJob::ensureItem();
+        InvoiceId   invoiceId   = TEST_CICreateSalesInvoiceJob::createAndPost(custAccount, itemId);
+
+        info(strFmt('TEST_CI: invoice %1 posted for customer %2 on %3.', invoiceId, custAccount, TEST_CIHelper::today()));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createAndPost</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Creates a sales order for _custAccount with one line of _itemId and posts the invoice
+    /// (packing slip and invoice together) on _invoiceDate. Returns the invoice ID.
+    /// ConsTarget_JP is set to _consTarget unless _keepCustomerDefault is true, in which case
+    /// the standard default from the customer's consolidation day is kept.
+    /// _taxItemGroup blank = the item's sales item tax group.
+    /// </summary>
+    public static InvoiceId createAndPost(
+        CustAccount       _custAccount,
+        ItemId            _itemId,
+        TransDate         _invoiceDate         = TEST_CIHelper::today(),
+        Qty               _qty                 = #Qty,
+        SalesPrice        _unitPrice           = #UnitPrice,
+        NoYes             _consTarget          = NoYes::Yes,
+        boolean           _keepCustomerDefault = false,
+        TaxItemGroup      _taxItemGroup        = '',
+        InventLocationId  _warehouse           = #Warehouse,
+        SalesFixedDueDate _fixedDueDate        = dateNull(),
+        CustRef           _customerRef         = #CustomerRef)
+    {
+        SalesTable      salesTable;
+        SalesFormLetter salesFormLetter;
+
+        if (!CustTable::find(_custAccount).RecId)
+        {
+            throw error(strFmt('TEST_CI: customer %1 does not exist. Run TEST_CICreateCustomerJob first.', _custAccount));
+        }
+
+        if (!InventTable::find(_itemId).RecId)
+        {
+            throw error(strFmt('TEST_CI: item %1 does not exist. Run TEST_CICreateItemJob first.', _itemId));
+        }
+
+        if (!_qty || !_invoiceDate)
+        {
+            throw error('TEST_CI: quantity must not be 0 and the invoice date is required.');
+        }
+
+        ttsbegin;
+        salesTable = TEST_CICreateSalesInvoiceJob::createSalesOrder(_custAccount, _warehouse, _consTarget, _keepCustomerDefault, _fixedDueDate, _customerRef);
+        TEST_CICreateSalesInvoiceJob::createSalesLine(salesTable, _itemId, _qty, _unitPrice, _taxItemGroup, _warehouse);
+        ttscommit;
+
+        salesFormLetter = SalesFormLetter::construct(DocumentStatus::Invoice);
+        salesFormLetter.update(salesTable, _invoiceDate, SalesUpdate::All, AccountOrder::None, NoYes::No, NoYes::No, NoYes::No);
+
+        return TEST_CICreateSalesInvoiceJob::findInvoiceId(salesTable.SalesId, _invoiceDate);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createCreditNote</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Posts a credit note: a sales order with a negative quantity of _itemId, invoiced on _invoiceDate.
+    /// </summary>
+    public static InvoiceId createCreditNote(
+        CustAccount  _custAccount,
+        ItemId       _itemId,
+        TransDate    _invoiceDate  = TEST_CIHelper::today(),
+        Qty          _qty          = #Qty,
+        SalesPrice   _unitPrice    = #UnitPrice,
+        NoYes        _consTarget   = NoYes::Yes,
+        TaxItemGroup _taxItemGroup = '')
+    {
+        return TEST_CICreateSalesInvoiceJob::createAndPost(
+            _custAccount,
+            _itemId,
+            _invoiceDate,
+            -abs(_qty),
+            _unitPrice,
+            _consTarget,
+            false,
+            _taxItemGroup);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSalesOrder</Name>
+				<Source><![CDATA[
+    private static SalesTable createSalesOrder(
+        CustAccount       _custAccount,
+        InventLocationId  _warehouse,
+        NoYes             _consTarget,
+        boolean           _keepCustomerDefault,
+        SalesFixedDueDate _fixedDueDate,
+        CustRef           _customerRef)
+    {
+        SalesTable salesTable;
+        NumberSeq  salesIdNumSeq = NumberSeq::newGetNum(SalesParameters::numRefSalesId(), true);
+        InventDim  inventDim     = TEST_RunTestDataPreparationSmokeJob::resolveDefaultInventDim(_warehouse);
+
+        salesTable.clear();
+        salesTable.initValue();
+        salesTable.SalesId     = salesIdNumSeq.num();
+        salesTable.CustAccount = _custAccount;
+        salesTable.initFromCustTable();
+        salesTable.SalesType        = SalesType::Sales;
+        salesTable.LanguageId       = infolog.language();
+        salesTable.InventSiteId     = inventDim.InventSiteId;
+        salesTable.InventLocationId = inventDim.InventLocationId;
+        salesTable.CustomerRef      = _customerRef;
+        salesTable.FixedDueDate     = _fixedDueDate;
+
+        if (!_keepCustomerDefault)
+        {
+            salesTable.ConsTarget_JP = _consTarget;
+        }
+
+        if (!salesTable.validateWrite())
+        {
+            salesIdNumSeq.abort();
+            throw error(strFmt('TEST_CI: sales order for customer %1 failed validation. See the messages above.', _custAccount));
+        }
+
+        salesTable.insert();
+        salesIdNumSeq.used();
+
+        return salesTable;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createSalesLine</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Inserts one line with a fixed price. Price search is off and the price, unit and item
+    /// tax group are set before createLine, so the line amount is exactly qty x price.
+    /// </summary>
+    private static void createSalesLine(
+        SalesTable       _salesTable,
+        ItemId           _itemId,
+        Qty              _qty,
+        SalesPrice       _unitPrice,
+        TaxItemGroup     _taxItemGroup,
+        InventLocationId _warehouse)
+    {
+        SalesLine         salesLine;
+        InventDim         inventDim   = TEST_RunTestDataPreparationSmokeJob::resolveDefaultInventDim(_warehouse);
+        InventTableModule salesModule = InventTableModule::find(_itemId, ModuleInventPurchSales::Sales);
+
+        salesLine.clear();
+        salesLine.initFromSalesTable(_salesTable);
+        salesLine.ItemId       = _itemId;
+        salesLine.InventDimId  = inventDim.InventDimId;
+        salesLine.SalesQty     = _qty;
+        salesLine.SalesUnit    = salesModule.UnitId;
+        salesLine.SalesPrice   = _unitPrice;
+        salesLine.PriceUnit    = 1;
+        salesLine.TaxItemGroup = _taxItemGroup ? _taxItemGroup : salesModule.TaxItemGroupId;
+        salesLine.LineAmount   = salesLine.calcLineAmount();
+
+        if (!salesLine.TaxItemGroup)
+        {
+            warning(strFmt('TEST_CI: item %1 has no sales item tax group; no consumption tax will be calculated on this line.', _itemId));
+        }
+
+        salesLine.createLine(true, false, false, true, false, false);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findInvoiceId</Name>
+				<Source><![CDATA[
+    private static InvoiceId findInvoiceId(SalesId _salesId, TransDate _invoiceDate)
+    {
+        CustInvoiceJour custInvoiceJour;
+
+        select firstonly InvoiceId from custInvoiceJour
+            order by RecId desc
+            where custInvoiceJour.SalesId     == _salesId
+               && custInvoiceJour.InvoiceDate == _invoiceDate;
+
+        if (!custInvoiceJour.InvoiceId)
+        {
+            throw error(strFmt('TEST_CI: sales order %1 was created but no invoice dated %2 was posted. See the messages above.', _salesId, _invoiceDate));
+        }
+
+        return custInvoiceJour.InvoiceId;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

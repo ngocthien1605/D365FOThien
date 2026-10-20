@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_CICreateFreeTextInvoiceJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// CI test data - creates and posts a one-line free text invoice.
+/// Standard never puts a free text invoice in a consolidated invoice (it has no sales order),
+/// so this is the negative test data.
+/// Not idempotent: every call creates a new invoice.
+/// Run: &mi=SysClassRunner&cls=TEST_CICreateFreeTextInvoiceJob (default customer, today)
+/// </summary>
+public final class TEST_CICreateFreeTextInvoiceJob
+{
+    #define.Amount(1005)
+    #define.Description('TEST_CI free text invoice')
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        CustAccount custAccount = TEST_CICreateCustomerJob::ensureCustomer();
+        InvoiceId   invoiceId   = TEST_CICreateFreeTextInvoiceJob::createAndPost(custAccount);
+
+        info(strFmt('TEST_CI: free text invoice %1 posted for customer %2.', invoiceId, custAccount));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createAndPost</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Posts a free text invoice of _amount for _custAccount on _invoiceDate to revenue
+    /// account _mainAccount (blank = first Revenue main account of the chart of accounts).
+    /// Returns the invoice ID.
+    /// </summary>
+    public static InvoiceId createAndPost(
+        CustAccount    _custAccount,
+        TransDate      _invoiceDate  = TEST_CIHelper::today(),
+        AmountCur      _amount       = #Amount,
+        MainAccountNum _mainAccount  = '',
+        TaxItemGroup   _taxItemGroup = '')
+    {
+        CustTable        custTable   = CustTable::find(_custAccount);
+        MainAccountNum   mainAccount = TEST_CICreateFreeTextInvoiceJob::resolveMainAccount(_mainAccount);
+        // CustInvoiceTable needs the FinanceInsightsContracts module reference (Descriptor/Thien.xml).
+        CustInvoiceTable custInvoiceTable;
+        CustInvoiceLine  custInvoiceLine;
+        RecId            invoiceRecId;
+
+        if (!custTable.RecId)
+        {
+            throw error(strFmt('TEST_CI: customer %1 does not exist. Run TEST_CICreateCustomerJob first.', _custAccount));
+        }
+
+        if (!_amount || !_invoiceDate)
+        {
+            throw error('TEST_CI: amount must not be 0 and the invoice date is required.');
+        }
+
+        ttsbegin;
+
+        custInvoiceTable.clear();
+        custInvoiceTable.initValue();
+        custInvoiceTable.OrderAccount = custTable.AccountNum;
+        custInvoiceTable.initFromCustTable(custTable);
+        custInvoiceTable.InvoiceDate  = _invoiceDate;
+        custInvoiceTable.DocumentDate = _invoiceDate;
+        custInvoiceTable.insert();
+        invoiceRecId = custInvoiceTable.RecId;
+
+        custInvoiceLine.clear();
+        custInvoiceLine.initValue();
+        custInvoiceLine.ParentRecId = custInvoiceTable.RecId;
+        custInvoiceLine.initFromCustInvoiceTable(custInvoiceTable);
+        custInvoiceLine.LineNum         = 1;
+        custInvoiceLine.Description     = #Description;
+        custInvoiceLine.LedgerDimension = LedgerDefaultAccountHelper::getDefaultAccountFromMainAccountIdAndCOA(mainAccount, LedgerChartOfAccounts::current());
+        custInvoiceLine.modifiedField(fieldNum(CustInvoiceLine, LedgerDimension));
+        custInvoiceLine.Quantity  = 1;
+        custInvoiceLine.UnitPrice = _amount;
+        custInvoiceLine.AmountCur = _amount;
+
+        if (_taxItemGroup)
+        {
+            custInvoiceLine.TaxItemGroup = _taxItemGroup;
+        }
+
+        custInvoiceLine.insert();
+
+        ttscommit;
+
+        CustPostInvoice::construct(custInvoiceTable, TypeOfCreditmaxCheck::None).run();
+
+        select firstonly custInvoiceTable
+            where custInvoiceTable.RecId == invoiceRecId;
+
+        if (!custInvoiceTable.Posted || !custInvoiceTable.InvoiceId)
+        {
+            throw error(strFmt('TEST_CI: free text invoice for customer %1 was created but not posted. See the messages above.', _custAccount));
+        }
+
+        return custInvoiceTable.InvoiceId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveMainAccount</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// _override when given and it exists in the current chart of accounts,
+    /// otherwise the first main account of type Revenue.
+    /// </summary>
+    private static MainAccountNum resolveMainAccount(MainAccountNum _override)
+    {
+        MainAccount mainAccount;
+        RecId       chartOfAccounts = LedgerChartOfAccounts::current();
+
+        if (_override)
+        {
+            select firstonly MainAccountId from mainAccount
+                where mainAccount.MainAccountId         == _override
+                   && mainAccount.LedgerChartOfAccounts == chartOfAccounts;
+
+            if (!mainAccount.MainAccountId)
+            {
+                throw error(strFmt('TEST_CI: main account %1 does not exist in the current chart of accounts.', _override));
+            }
+        }
+        else
+        {
+            select firstonly MainAccountId from mainAccount
+                order by MainAccountId
+                where mainAccount.LedgerChartOfAccounts == chartOfAccounts
+                   && mainAccount.Type                  == DimensionLedgerAccountType::Revenue;
+
+            if (!mainAccount.MainAccountId)
+            {
+                throw error('TEST_CI: no main account of type Revenue in the current chart of accounts. Pass the revenue account for the free text invoice.');
+            }
+        }
+
+        return mainAccount.MainAccountId;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_CICreateCustomerJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// CI test data - creates or updates the test customer for the Japan consolidated invoice.
+/// Idempotent: running it again updates the consolidation day and the other given values.
+/// Blank group / terms / method of payment / tax group are copied from a template customer
+/// (the given one, or the first unblocked customer in accounting currency).
+/// Run: &mi=SysClassRunner&cls=TEST_CICreateCustomerJob
+/// </summary>
+public final class TEST_CICreateCustomerJob
+{
+    #define.CustAccount('TCI-CUST01')
+    #define.CustName('TEST_CI consolidated invoice customer')
+    #define.ConsDay(20)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        CustAccount custAccount = TEST_CICreateCustomerJob::ensureCustomer();
+
+        info(strFmt('TEST_CI: customer %1 is ready, consolidation day %2.', custAccount, CustTable::find(custAccount).ConsDay_JP));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ensureCustomer</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Creates customer _custAccount, or updates it when it exists, and returns its account.
+    /// Prices never include tax (InclTax = No), because a tax-inclusive invoice blocks
+    /// posting of the consolidated invoice tax difference.
+    /// </summary>
+    public static CustAccount ensureCustomer(
+        CustAccount        _custAccount     = #CustAccount,
+        Name               _name            = #CustName,
+        CustConsDay_JP     _consDay         = #ConsDay,
+        CustGroupId        _custGroup       = '',
+        CustPaymTermId     _paymTermId      = '',
+        CustPaymMode       _paymMode        = '',
+        TaxGroup           _taxGroup        = '',
+        CustInvoiceAccount _invoiceAccount  = '',
+        CustAccount        _templateAccount = '')
+    {
+        CustTable custTable;
+        CustTable template;
+        boolean   isNew;
+
+        TEST_CIHelper::assertPrerequisites();
+
+        if (!_custAccount)
+        {
+            throw error('TEST_CI: a customer account is required.');
+        }
+
+        if (_consDay < 0 || _consDay > 31)
+        {
+            throw error(strFmt('TEST_CI: consolidation day %1 is outside the allowed range 0-31.', _consDay));
+        }
+
+        if (_invoiceAccount && !CustTable::find(_invoiceAccount).RecId)
+        {
+            throw error(strFmt('TEST_CI: invoice account %1 does not exist.', _invoiceAccount));
+        }
+
+        ttsbegin;
+
+        custTable = CustTable::find(_custAccount, true);
+        isNew     = !custTable.RecId;
+
+        if (isNew)
+        {
+            template = TEST_CICreateCustomerJob::resolveTemplateCustomer(_templateAccount, _custAccount);
+
+            custTable.clear();
+            custTable.initValue();
+            custTable.AccountNum = _custAccount;
+            custTable.Currency   = Ledger::accountingCurrency();
+            custTable.CustGroup  = _custGroup  ? _custGroup  : template.CustGroup;
+            custTable.PaymTermId = _paymTermId ? _paymTermId : template.PaymTermId;
+            custTable.PaymMode   = _paymMode   ? _paymMode   : template.PaymMode;
+            custTable.TaxGroup   = _taxGroup   ? _taxGroup   : template.TaxGroup;
+        }
+        else
+        {
+            if (_custGroup)
+            {
+                custTable.CustGroup = _custGroup;
+            }
+
+            if (_paymTermId)
+            {
+                custTable.PaymTermId = _paymTermId;
+            }
+
+            if (_paymMode)
+            {
+                custTable.PaymMode = _paymMode;
+            }
+
+            if (_taxGroup)
+            {
+                custTable.TaxGroup = _taxGroup;
+            }
+        }
+
+        custTable.InclTax        = NoYes::No;
+        custTable.InvoiceAccount = _invoiceAccount;
+        custTable.ConsDay_JP     = _consDay;
+
+        if (!custTable.CustGroup || !custTable.PaymTermId)
+        {
+            throw error(strFmt('TEST_CI: customer %1 needs a customer group and terms of payment. Pass them, or pass a template customer that has both.', _custAccount));
+        }
+
+        if (isNew)
+        {
+            custTable.insert(DirPartyType::Organization, _name ? _name : #CustName);
+        }
+        else
+        {
+            custTable.update();
+        }
+
+        ttscommit;
+
+        return custTable.AccountNum;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveTemplateCustomer</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The customer whose group, terms of payment, method of payment and tax group a new
+    /// test customer copies: _templateAccount when given, otherwise the first unblocked
+    /// customer in accounting currency that has a group and terms of payment.
+    /// </summary>
+    private static CustTable resolveTemplateCustomer(CustAccount _templateAccount, CustAccount _exclude)
+    {
+        CustTable template;
+
+        if (_templateAccount)
+        {
+            template = CustTable::find(_templateAccount);
+
+            if (!template.RecId)
+            {
+                throw error(strFmt('TEST_CI: template customer %1 does not exist.', _templateAccount));
+            }
+
+            return template;
+        }
+
+        select firstonly template
+            order by AccountNum
+            where template.AccountNum != _exclude
+               && template.Blocked    == CustVendorBlocked::No
+               && template.Currency   == Ledger::accountingCurrency()
+               && template.CustGroup  != ''
+               && template.PaymTermId != '';
+
+        if (!template.RecId)
+        {
+            throw error('TEST_CI: no template customer found (unblocked, accounting currency, with customer group and terms of payment). Pass the customer group and terms of payment instead.');
+        }
+
+        return template;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

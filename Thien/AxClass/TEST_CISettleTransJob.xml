@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_CISettleTransJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// CI test data - settles an already posted payment against an already posted invoice,
+/// like Settle open transactions does. Must run outside a transaction.
+/// Standard cancels the settlement when the invoice is in an Unconfirmed consolidated invoice.
+/// Run: &mi=SysClassRunner&cls=TEST_CISettleTransJob (latest open payment against the oldest open invoice of the default customer)
+/// </summary>
+public final class TEST_CISettleTransJob
+{
+    #define.CustAccount('TCI-CUST01')
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        CustTrans paymentTrans = TEST_CISettleTransJob::findLatestOpenPayment(#CustAccount);
+        CustTrans invoiceTrans = TEST_CICreatePaymentJob::findOldestOpenInvoice(#CustAccount);
+        AmountCur settled      = TEST_CISettleTransJob::settle(#CustAccount, paymentTrans.Voucher, invoiceTrans.Invoice);
+
+        info(strFmt('TEST_CI: payment %1 settled %2 against invoice %3.', paymentTrans.Voucher, settled, invoiceTrans.Invoice));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>settle</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Settles payment voucher _paymentVoucher against invoice _invoiceId of _custAccount and
+    /// returns the settled amount. _amount 0 = the smaller of the two open amounts.
+    /// </summary>
+    public static AmountCur settle(
+        CustAccount _custAccount,
+        Voucher     _paymentVoucher,
+        InvoiceId   _invoiceId,
+        AmountCur   _amount = 0)
+    {
+        CustTable                 custTable    = CustTable::find(_custAccount);
+        CustTrans                 paymentTrans = TEST_CIHelper::findPaymentCustTrans(_paymentVoucher, _custAccount);
+        CustTransOpen             paymentOpen  = TEST_CIHelper::findOpen(paymentTrans);
+        CustTrans                 invoiceTrans = TEST_CIHelper::findInvoiceCustTrans(_invoiceId, _custAccount);
+        CustTransOpen             invoiceOpen  = TEST_CIHelper::findOpen(invoiceTrans);
+        AmountCur                 amount       = _amount ? _amount : min(-paymentOpen.AmountCur, invoiceOpen.AmountCur);
+        SpecTransExecutionContext specTransExecutionContext;
+        SpecTransManager          specTransManager;
+
+        if (appl.ttsLevel() != 0)
+        {
+            throw error('TEST_CI: settlement must run outside a transaction.');
+        }
+
+        if (amount <= 0 || amount > -paymentOpen.AmountCur || amount > invoiceOpen.AmountCur)
+        {
+            throw error(strFmt('TEST_CI: the settle amount %1 must be positive and not larger than the open payment %2 or the open invoice %3.', amount, -paymentOpen.AmountCur, invoiceOpen.AmountCur));
+        }
+
+        specTransExecutionContext = SpecTransExecutionContext::newFromSource(custTable);
+        specTransManager          = SpecTransManager::newFromSpec(specTransExecutionContext.parmSpecContext());
+        specTransManager.deleteAll();
+        specTransManager.insert(paymentOpen.DataAreaId, paymentOpen.TableId, paymentOpen.RecId, -amount, paymentTrans.CurrencyCode);
+        specTransManager.insert(invoiceOpen.DataAreaId, invoiceOpen.TableId, invoiceOpen.RecId, amount, invoiceTrans.CurrencyCode);
+
+        if (!CustTrans::settleTransaction(specTransExecutionContext, CustTransSettleTransactionParameters::construct()))
+        {
+            throw error(strFmt('TEST_CI: settling payment %1 against invoice %2 failed. See the messages above.', _paymentVoucher, _invoiceId));
+        }
+
+        return amount;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findLatestOpenPayment</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The newest open payment transaction of _custAccount.
+    /// </summary>
+    public static CustTrans findLatestOpenPayment(CustAccount _custAccount)
+    {
+        CustTrans     custTrans;
+        CustTransOpen custTransOpen;
+
+        select firstonly custTrans
+            order by TransDate desc, RecId desc
+            where custTrans.AccountNum == _custAccount
+               && custTrans.TransType  == LedgerTransType::Payment
+               && custTrans.AmountCur  <  0
+            exists join custTransOpen
+                where custTransOpen.RefRecId == custTrans.RecId;
+
+        if (!custTrans.RecId)
+        {
+            throw error(strFmt('TEST_CI: customer %1 has no open payment.', _custAccount));
+        }
+
+        return custTrans;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>
