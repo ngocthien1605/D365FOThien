@@ -1,0 +1,10 @@
+# Track only the model descriptor and object XML files; build output stays out
+/*
+!/.gitignore
+!/Descriptor/
+!/Thien/
+/Descriptor/*
+!/Descriptor/Thien.xml
+/Thien/**
+!/Thien/**/
+!/Thien/**/*.xml
