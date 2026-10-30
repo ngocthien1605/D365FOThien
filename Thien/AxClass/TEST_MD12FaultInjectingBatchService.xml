@@ -1,0 +1,343 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12FaultInjectingBatchService</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// Test double for TEST_MD12RetryTest. Replaces the step methods of
+/// SJPMDInventCountingBatchService - validateGroup, createJournal, postJournal, isJournalPosted
+/// and archiveJournalGroup - so a test can make a chosen step of a chosen journal group throw a
+/// chosen exception for a chosen number of calls, without creating or posting any journal.
+/// processGroup, processJournalGroupSafe and processJournalGroup - the code under test - run
+/// unchanged. Faults are keyed by WarehouseId, so each test gives each journal group its own
+/// warehouse. Records how often each step ran and the order in which journals were created.
+///
+/// useRealJournal() keeps the real validate, create, post and isJournalPosted steps and only
+/// injects faults into the archive step, to show that a real posting is rolled back together
+/// with a failed archive.
+/// </summary>
+public final class TEST_MD12FaultInjectingBatchService extends SJPMDInventCountingBatchService
+{
+    public const int StepCreate  = 1;
+    public const int StepPost    = 2;
+    public const int StepArchive = 3;
+
+    // warehouse|step -> [Exception, number of failing calls, infolog message]
+    Map faultsByKey;
+    Set warehousesLeftNew;
+    Set warehousesNotPosted;
+    Map callsByKey;
+    Set postedJournals;
+    // Made-up journal id -> warehouse of its journal group.
+    Map warehouseByJournal;
+    int journalCounter;
+    // "warehouse|counting date" of each createJournal call, in call order.
+    List createOrder;
+    boolean realJournal;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    protected void new()
+    {
+        super();
+
+        faultsByKey         = new Map(Types::String, Types::Container);
+        warehousesLeftNew   = new Set(Types::String);
+        warehousesNotPosted = new Set(Types::String);
+        callsByKey          = new Map(Types::String, Types::Integer);
+        postedJournals      = new Set(Types::String);
+        warehouseByJournal  = new Map(Types::String, Types::String);
+        createOrder         = new List(Types::String);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static TEST_MD12FaultInjectingBatchService construct()
+    {
+        return new TEST_MD12FaultInjectingBatchService();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>useRealJournal</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Validate, create, post and isJournalPosted run the real code; faults apply to the archive
+    /// step only, which runs the real archive when it does not throw.
+    /// </summary>
+    public TEST_MD12FaultInjectingBatchService useRealJournal()
+    {
+        realJournal = true;
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addFault</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The first _failingCalls calls of _step for the journal group of _warehouseId throw
+    /// _exception (maxInt() = every call). _infologMessage, when given, is written as an error on
+    /// every call of the step, including the ones that do not throw.
+    /// </summary>
+    public TEST_MD12FaultInjectingBatchService addFault(
+        SJPMDInventCountingWarehouseId _warehouseId,
+        int                            _step,
+        Exception                      _exception,
+        int                            _failingCalls,
+        str                            _infologMessage = '')
+    {
+        faultsByKey.insert(this.key(_warehouseId, _step), [_exception, _failingCalls, _infologMessage]);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>leaveNew</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The archive step returns without touching the journal group's rows, so they stay New.
+    /// </summary>
+    public TEST_MD12FaultInjectingBatchService leaveNew(SJPMDInventCountingWarehouseId _warehouseId)
+    {
+        warehousesLeftNew.add(_warehouseId);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postWithoutPosting</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The post step of the journal group returns without an exception but leaves the journal
+    /// unposted, as a posting whose checks failed without throwing would.
+    /// </summary>
+    public TEST_MD12FaultInjectingBatchService postWithoutPosting(SJPMDInventCountingWarehouseId _warehouseId)
+    {
+        warehousesNotPosted.add(_warehouseId);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>callsFor</Name>
+				<Source><![CDATA[
+    public int callsFor(SJPMDInventCountingWarehouseId _warehouseId, int _step)
+    {
+        str key = this.key(_warehouseId, _step);
+
+        return callsByKey.exists(key) ? callsByKey.lookup(key) : 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createOrder</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// "warehouse|counting date" of each createJournal call, in call order.
+    /// </summary>
+    public List createOrder()
+    {
+        return createOrder;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>validateGroup</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The test rows use made-up items and warehouses; every journal group passes validation
+    /// (real validation with useRealJournal).
+    /// </summary>
+    protected str validateGroup(SJPMDInventCountingFileName    _fileName,
+                                SJPMDInventCountingDate        _countingDate,
+                                SJPMDInventCountingWarehouseId _warehouseId)
+    {
+        return realJournal ? super(_fileName, _countingDate, _warehouseId) : '';
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createJournal</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns a made-up journal id that differs per call, so a second creation is visible
+    /// (a real journal with useRealJournal).
+    /// </summary>
+    protected JournalId createJournal(SJPMDInventCountingFileName    _fileName,
+                                      SJPMDInventCountingDate        _countingDate,
+                                      SJPMDInventCountingWarehouseId _warehouseId)
+    {
+        int       calls = this.countCall(_warehouseId, TEST_MD12FaultInjectingBatchService::StepCreate);
+        JournalId journalId;
+
+        createOrder.addEnd(_warehouseId + '|' + _countingDate);
+
+        if (realJournal)
+        {
+            journalId = super(_fileName, _countingDate, _warehouseId);
+        }
+        else
+        {
+            this.applyFault(_warehouseId, TEST_MD12FaultInjectingBatchService::StepCreate, calls);
+
+            journalCounter++;
+            journalId = 'TESTJ' + int2Str(journalCounter);
+        }
+
+        warehouseByJournal.insert(journalId, _warehouseId);
+
+        return journalId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>postJournal</Name>
+				<Source><![CDATA[
+    protected void postJournal(JournalId _journalId)
+    {
+        SJPMDInventCountingWarehouseId warehouseId = warehouseByJournal.lookup(_journalId);
+        int                            calls       = this.countCall(warehouseId, TEST_MD12FaultInjectingBatchService::StepPost);
+
+        if (realJournal)
+        {
+            super(_journalId);
+            return;
+        }
+
+        this.applyFault(warehouseId, TEST_MD12FaultInjectingBatchService::StepPost, calls);
+
+        if (!warehousesNotPosted.in(warehouseId))
+        {
+            postedJournals.add(_journalId);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isJournalPosted</Name>
+				<Source><![CDATA[
+    protected boolean isJournalPosted(JournalId _journalId)
+    {
+        return realJournal ? super(_journalId) : postedJournals.in(_journalId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>archiveJournalGroup</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Removes the journal group's staging rows, as the real archive step does (without writing
+    /// archive rows; the real archive with useRealJournal). Runs inside the caller's transaction.
+    /// </summary>
+    protected void archiveJournalGroup(SJPMDInventCountingFileName    _fileName,
+                                       SJPMDInventCountingDate        _countingDate,
+                                       SJPMDInventCountingWarehouseId _warehouseId)
+    {
+        SJPMDInventCountingAddOn addOn;
+        int                      calls = this.countCall(_warehouseId, TEST_MD12FaultInjectingBatchService::StepArchive);
+
+        if (warehousesLeftNew.in(_warehouseId))
+        {
+            return;
+        }
+
+        this.applyFault(_warehouseId, TEST_MD12FaultInjectingBatchService::StepArchive, calls);
+
+        if (realJournal)
+        {
+            super(_fileName, _countingDate, _warehouseId);
+            return;
+        }
+
+        delete_from addOn
+            where addOn.FileName     == _fileName
+               && addOn.CountingDate == _countingDate
+               && addOn.WarehouseId  == _warehouseId
+               && addOn.Status       == SJPMDInventCountingStatus::New;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>applyFault</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Writes the step's infolog message and throws its exception while _calls is within the
+    /// failing calls.
+    /// </summary>
+    private void applyFault(SJPMDInventCountingWarehouseId _warehouseId, int _step, int _calls)
+    {
+        str       key = this.key(_warehouseId, _step);
+        Exception faultException;
+        int       failingCalls;
+        str       infologMessage;
+
+        if (!faultsByKey.exists(key))
+        {
+            return;
+        }
+
+        [faultException, failingCalls, infologMessage] = faultsByKey.lookup(key);
+
+        if (infologMessage)
+        {
+            error(infologMessage);
+        }
+
+        if (_calls <= failingCalls)
+        {
+            throw faultException;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>countCall</Name>
+				<Source><![CDATA[
+    private int countCall(SJPMDInventCountingWarehouseId _warehouseId, int _step)
+    {
+        int calls = this.callsFor(_warehouseId, _step) + 1;
+
+        callsByKey.insert(this.key(_warehouseId, _step), calls);
+
+        return calls;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>key</Name>
+				<Source><![CDATA[
+    private str key(SJPMDInventCountingWarehouseId _warehouseId, int _step)
+    {
+        return _warehouseId + '|' + int2Str(_step);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

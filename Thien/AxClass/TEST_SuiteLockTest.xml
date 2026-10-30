@@ -1,0 +1,184 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_SuiteLockTest</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// TEST_SuiteLock, the lock across sessions that test classes committing data take in
+/// setUpTestCase: a second run is refused with the owner, a release needs the owner's token, a
+/// lock left by a run that stopped more than an hour ago is taken over, and a lock without a
+/// start time is not.
+/// Runs with TestTransactionMode::None, because the lock is committed like in a real run; the
+/// class uses its own scope and deletes its lock rows in setUp and tearDown.
+/// </summary>
+[SysTestTarget(classStr(TEST_SuiteLock), UtilElementType::Class)]
+[SysTestTransaction(TestTransactionMode::None)]
+public final class TEST_SuiteLockTest extends SysTestCase
+{
+    #define.Scope('TEST.SuiteLockTest')
+    // Must match the macro in TEST_SuiteLock.
+    #define.LockKey('Suite')
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setUp</Name>
+				<Source><![CDATA[
+    public void setUp()
+    {
+        super();
+
+        this.deleteLocks();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tearDown</Name>
+				<Source><![CDATA[
+    public void tearDown()
+    {
+        this.deleteLocks();
+
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc01_secondAcquire_isRefusedWithOwner</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC01: while one run holds the lock, a second acquire throws, names the scope, and leaves
+    /// the first run's lock in place.
+    /// </summary>
+    [SysTestMethod]
+    public void tc01_secondAcquire_isRefusedWithOwner()
+    {
+        guid    token = TEST_SuiteLock::acquire(#Scope);
+        boolean refused;
+        str     message;
+
+        try
+        {
+            TEST_SuiteLock::acquire(#Scope);
+        }
+        catch (Exception::Error)
+        {
+            refused = true;
+            message = infolog.text(infologLine());
+        }
+
+        this.assertTrue(refused, 'The second acquire is refused');
+        this.assertTrue(strScan(message, #Scope, 1, strLen(message)) > 0, strFmt('The message names the scope: %1', message));
+        this.assertTrue(SJPMDIntegrationRunLock::isLocked(#Scope, #LockKey), 'The first run keeps its lock');
+
+        TEST_SuiteLock::release(#Scope, token);
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#Scope, #LockKey), 'The owner releases it');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc02_releaseWithOtherToken_keepsLock</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC02: only the owner's token releases the lock; another token or an empty one (a run
+    /// whose setUpTestCase was refused) leaves it.
+    /// </summary>
+    [SysTestMethod]
+    public void tc02_releaseWithOtherToken_keepsLock()
+    {
+        guid token = TEST_SuiteLock::acquire(#Scope);
+
+        TEST_SuiteLock::release(#Scope, newGuid());
+        this.assertTrue(SJPMDIntegrationRunLock::isLocked(#Scope, #LockKey), 'Another token does not release it');
+
+        TEST_SuiteLock::release(#Scope, emptyGuid());
+        this.assertTrue(SJPMDIntegrationRunLock::isLocked(#Scope, #LockKey), 'An empty token does not release it');
+
+        TEST_SuiteLock::release(#Scope, token);
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#Scope, #LockKey), 'The owner token releases it');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc03_staleLock_isTakenOver</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC03: a lock taken two hours ago was left by a run that stopped before tearDownTestCase.
+    /// acquire takes it over instead of refusing, and the lock then belongs to the new token.
+    /// </summary>
+    [SysTestMethod]
+    public void tc03_staleLock_isTakenOver()
+    {
+        SJPMDIntegrationRunLock runLock;
+        guid                    token;
+
+        this.assertTrue(SJPMDIntegrationRunLock::tryAcquire(#Scope, #LockKey, newGuid(),
+                                                            TEST_SuiteLock::ownerContext(DateTimeUtil::addHours(DateTimeUtil::utcNow(), -2))),
+            'Arrange: a run that stopped two hours ago left its lock');
+
+        token = TEST_SuiteLock::acquire(#Scope);
+
+        select firstonly OwnerToken from runLock
+            where runLock.LockScope == #Scope
+               && runLock.LockKey   == #LockKey;
+        this.assertEquals(token, runLock.OwnerToken, 'The stale lock now belongs to the new run');
+
+        TEST_SuiteLock::release(#Scope, token);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc04_lockWithoutStartTime_isNotTakenOver</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC04: a lock whose OwnerContext has no start time (written another way) is never judged
+    /// stale: acquire refuses instead of taking it over.
+    /// </summary>
+    [SysTestMethod]
+    public void tc04_lockWithoutStartTime_isNotTakenOver()
+    {
+        guid    otherToken = newGuid();
+        boolean refused;
+
+        this.assertTrue(SJPMDIntegrationRunLock::tryAcquire(#Scope, #LockKey, otherToken, 'no start time'),
+            'Arrange: a lock without a start time');
+
+        try
+        {
+            TEST_SuiteLock::acquire(#Scope);
+        }
+        catch (Exception::Error)
+        {
+            refused = true;
+        }
+
+        this.assertTrue(refused, 'acquire refuses');
+
+        TEST_SuiteLock::release(#Scope, otherToken);
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#Scope, #LockKey), 'The owner can still release it');
+    }
+
+]]></Source>
+			</Method>			<Method>
+				<Name>deleteLocks</Name>
+				<Source><![CDATA[
+    private void deleteLocks()
+    {
+        SJPMDIntegrationRunLock runLock;
+
+        ttsbegin;
+        delete_from runLock
+            where runLock.LockScope == #Scope;
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

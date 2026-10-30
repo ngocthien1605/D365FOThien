@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_AutomationServiceTest</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// TEST_AutomationService, the JSON service of the XppLoop harness.
+/// Runs with TestTransactionMode::None: SJPBatchJobService.start catches the start failure only
+/// outside a transaction, as it does when ADF calls it. Uses the real MD12 run lock scope, so
+/// it fails when an MD12 run is going on; it deletes its own staging rows.
+/// </summary>
+[SysTestTarget(classStr(TEST_AutomationService), UtilElementType::Class)]
+[SysTestTransaction(TestTransactionMode::None)]
+public final class TEST_AutomationServiceTest extends SysTestCase
+{
+    // Must match the macros in SJPMDInventCountingService.
+    #define.MD12LockScope('MD12.InventCounting')
+    #define.MD12LockKey('Process')
+    #define.TestFile('TEST_AUTO_TC01')
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>tc01_startRejectedByRunLock_reportsNoJob</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC01: another run holds the MD12 run lock, so SJPBatchJobService.start rejects the start
+    /// (ret 999). startScenario must report ok false and batchJobId 0, and not a batch job some
+    /// other caller created in the meantime.
+    /// </summary>
+    [SysTestMethod]
+    public void tc01_startRejectedByRunLock_reportsNoJob()
+    {
+        guid                     otherRun = newGuid();
+        SJPMDInventCountingAddOn addOn;
+        str                      reply;
+
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#MD12LockScope, #MD12LockKey), 'Precondition: no MD12 run holds the lock');
+
+        ttsbegin;
+        TEST_MD12SeedDataHelper::insertRow(#TestFile, #TestFile, 'AUTO0001', '20260101', 'AUTOWH', 'AUTOLOC', 'AUTOITEM', 1);
+        ttscommit;
+
+        this.assertTrue(SJPMDIntegrationRunLock::tryAcquire(#MD12LockScope, #MD12LockKey, otherRun, 'TEST AUTO TC01 other run'),
+            'Arrange: the other run takes the lock');
+
+        try
+        {
+            reply = new TEST_AutomationService().startScenario('MD12', #TestFile, 1, curExt(), '');
+        }
+        finally
+        {
+            SJPMDIntegrationRunLock::release(#MD12LockScope, #MD12LockKey, otherRun);
+
+            ttsbegin;
+            delete_from addOn
+                where addOn.FileName == #TestFile;
+            ttscommit;
+        }
+
+        this.assertTrue(strScan(reply, '"ret":999', 1, strLen(reply)) > 0, strFmt('start was rejected: %1', reply));
+        this.assertTrue(strScan(reply, '"ok":false', 1, strLen(reply)) > 0, strFmt('ok is false: %1', reply));
+        this.assertTrue(strScan(reply, '"batchJobId":0', 1, strLen(reply)) > 0, strFmt('No batch job is reported: %1', reply));
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

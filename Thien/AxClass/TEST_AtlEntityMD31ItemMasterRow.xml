@@ -266,6 +266,29 @@ public final class TEST_AtlEntityMD31ItemMasterRow extends AtlEntity
 
 ]]></Source>
 			</Method>
+			<Method>
+				<Name>setProcessingGroup</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The group the orchestrator would have assigned (SJPMDItemMasterImportService.assignProcessingGroups).
+    /// </summary>
+    public TEST_AtlEntityMD31ItemMasterRow setProcessingGroup(int _processingGroup)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, ProcessingGroup), _processingGroup);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setStatus</Name>
+				<Source><![CDATA[
+    public TEST_AtlEntityMD31ItemMasterRow setStatus(SJPMDInventImportStatus _status)
+    {
+        return this.setField(fieldNum(SJPMDItemMaster, Status), _status);
+    }
+
+]]></Source>
+			</Method>
 		</Methods>
 	</SourceCode>
 </AxClass>

@@ -1,0 +1,937 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_AutomationService</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// JSON service for the agent test loop (harness: Tools/XppLoop/Invoke-XppLoop.ps1 in the Thien
+/// repository). Exposed as /api/services/TEST_AutomationServices/TEST_AutomationService/<operation>.
+/// Every operation returns a JSON text built with TEST_AutomationJson.
+///
+///   ping            service version, user, company, loaded Thien/SJP assemblies (to compare with
+///                   the local build) and whether expected classes, methods, tables or fields exist
+///   listSteps       the named seed and verify steps of TEST_AutomationStepRegistry
+///   runStep         runs a step now and returns its summary and infolog
+///   queueStep       runs a step as a batch job (TEST_AutomationStepTask) and returns the job id
+///   runTests        runs SysTest classes or single tests as a batch job (TEST_AutomationTestTask)
+///                   and returns the job id; the results are XPPTEST lines in its task log
+///   startScenario   starts MD12 / MD31 through SJPBatchJobService.start, the ADF entry point,
+///                   and returns the batch job it created
+///   batchJobStatus  status, tasks and task logs of a batch job
+///   stagingStatus   staging rows per status, archived rows, sample errors and run lock rows
+///
+/// The standard SysTestServices/SysTestService endpoint is disabled on the UDE, hence runTests.
+/// For the UDE test environment only.
+/// </summary>
+public final class TEST_AutomationService
+{
+    // Raise when an operation or a reply changes, so the harness can tell an old deployment.
+    public const str ServiceVersion = '4';
+
+    // Must match the macros in SJPMDInventCountingService and SJPMDItemMasterImportService.
+    #define.MD12LockScope('MD12.InventCounting')
+    #define.MD31LockScope('MD31.ItemMaster')
+    #define.MaxErrorsListed(10)
+    #define.DefaultMaxLogLines(200)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>ping</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Confirms the service is deployed and reports what is deployed.
+    /// _expect is a comma-separated list of "Class", "Class.method", "Table" or "Table.field";
+    /// each is reported with exists true or false, so the harness can confirm that a deployment
+    /// contains a new method or field.
+    /// </summary>
+    public str ping(str _expect)
+    {
+        TEST_AutomationJson         json     = TEST_AutomationJson::construct();
+        container                   elements = str2con(_expect, ',', false);
+        str                         element;
+        int                         i;
+        // Creating an SJP object makes sure the SJP assembly is loaded before it is looked up.
+        SJPBatchJobResponseContract loadSjp  = new SJPBatchJobResponseContract();
+
+        json.beginObject();
+        json.addString('serviceVersion', TEST_AutomationService::ServiceVersion);
+        json.addString('user', curUserId());
+        json.addString('company', curExt());
+        json.addDateTime('serverUtc', DateTimeUtil::utcNow());
+        json.addInt('lastBatchJobId', TEST_AutomationService::lastBatchJobId());
+
+        json.beginArray('assemblies');
+        TEST_AutomationService::addAssembly(json, 'Dynamics.AX.Thien');
+        TEST_AutomationService::addAssembly(json, 'Dynamics.AX.SJP');
+        json.endArray();
+
+        json.beginArray('expect');
+        for (i = 1; i <= conLen(elements); i++)
+        {
+            element = strLTrim(strRTrim(conPeek(elements, i)));
+
+            if (element)
+            {
+                json.beginObject();
+                json.addString('element', element);
+                json.addBool('exists', TEST_AutomationService::elementExists(element));
+                json.endObject();
+            }
+        }
+        json.endArray();
+
+        json.endObject();
+
+        return json.toString();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>listSteps</Name>
+				<Source><![CDATA[
+    public str listSteps()
+    {
+        TEST_AutomationJson json  = TEST_AutomationJson::construct();
+        container           steps = TEST_AutomationStepRegistry::steps();
+        container           step;
+        int                 i;
+
+        json.beginObject();
+        json.beginArray('steps');
+
+        for (i = 1; i <= conLen(steps); i++)
+        {
+            step = conPeek(steps, i);
+
+            json.beginObject();
+            json.addString('name', conPeek(step, 1));
+            json.addString('description', conPeek(step, 2));
+            json.endObject();
+        }
+
+        json.endArray();
+        json.endObject();
+
+        return json.toString();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runStep</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Runs a step of TEST_AutomationStepRegistry in _company (blank: the user's company) and
+    /// returns ok, verdict (PASS / FAIL when the summary starts with it, DONE otherwise, ERROR
+    /// when the step threw), the summary, the error and the infolog the step wrote.
+    /// </summary>
+    public str runStep(str _step, str _company, str _arg1, str _arg2, str _arg3, str _arg4)
+    {
+        TEST_AutomationJson          json      = TEST_AutomationJson::construct();
+        System.Diagnostics.Stopwatch stopwatch = System.Diagnostics.Stopwatch::StartNew();
+        DataAreaId                   company   = TEST_AutomationService::company(_company);
+        str                          summary;
+        str                          errorText;
+        boolean                      ok;
+        container                    infologData;
+        int                          startLine;
+
+        changecompany (company)
+        {
+            startLine = infologLine();
+
+            try
+            {
+                summary = TEST_AutomationStepRegistry::run(_step, _arg1, _arg2, _arg3, _arg4);
+                ok      = true;
+            }
+            catch (Exception::CLRError)
+            {
+                errorText = TEST_AutomationService::clrErrorText();
+            }
+            catch (Exception::Error)
+            {
+                errorText = 'The step threw an error; see the infolog.';
+            }
+            catch
+            {
+                errorText = 'The step threw an unexpected exception; see the infolog.';
+            }
+
+            infologData = TEST_AutomationService::infologSince(startLine);
+        }
+
+        json.beginObject();
+        json.addString('step', _step);
+        json.addString('company', company);
+        json.addBool('ok', ok);
+        json.addString('verdict', TEST_AutomationService::verdict(ok, summary));
+        json.addString('summary', summary);
+        json.addString('error', errorText);
+        json.addInt('durationMs', stopwatch.get_ElapsedMilliseconds());
+        json.addInt('infologSkipped', json.addInfolog('infolog', infologData, #DefaultMaxLogLines));
+        json.endObject();
+
+        return json.toString();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>queueStep</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Schedules a step as a one-task batch job in _company and returns its batchJobId.
+    /// Poll batchJobStatus until done; the summary is in the task's infolog.
+    /// </summary>
+    public str queueStep(str _step, str _company, str _arg1, str _arg2, str _arg3, str _arg4)
+    {
+        TEST_AutomationJson json    = TEST_AutomationJson::construct();
+        DataAreaId          company = TEST_AutomationService::company(_company);
+        RefRecId            batchJobId;
+        str                 errorText;
+
+        [batchJobId, errorText] = TEST_AutomationService::scheduleTask(
+            TEST_AutomationStepTask::newStep(_step, _arg1, _arg2, _arg3, _arg4),
+            strFmt('TEST automation step %1', _step),
+            company);
+
+        json.beginObject();
+        json.addString('step', _step);
+        json.addString('company', company);
+        json.addBool('ok', batchJobId != 0);
+        json.addInt('batchJobId', batchJobId);
+        json.addString('error', errorText);
+        json.endObject();
+
+        return json.toString();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runTests</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Schedules a batch job that runs the test classes (_testClasses, comma-separated) and single
+    /// tests (_tests, comma-separated Class.method) in _company, and returns its batchJobId. Poll
+    /// batchJobStatus until done; each test is an XPPTEST line of the task log.
+    /// </summary>
+    public str runTests(str _testClasses, str _tests, str _company)
+    {
+        TEST_AutomationJson json    = TEST_AutomationJson::construct();
+        DataAreaId          company = TEST_AutomationService::company(_company);
+        RefRecId            batchJobId;
+        str                 errorText;
+
+        [batchJobId, errorText] = TEST_AutomationService::scheduleTask(
+            TEST_AutomationTestTask::newTests(_testClasses, _tests),
+            'TEST automation unit test run',
+            company);
+
+        json.beginObject();
+        json.addString('testClasses', _testClasses);
+        json.addString('tests', _tests);
+        json.addString('company', company);
+        json.addBool('ok', batchJobId != 0);
+        json.addInt('batchJobId', batchJobId);
+        json.addString('error', errorText);
+        json.endObject();
+
+        return json.toString();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>scheduleTask</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Saves a one-task batch job for _task in _company; returns [batchJobId, error text].
+    /// </summary>
+    private static container scheduleTask(RunBaseBatch _task, str _caption, DataAreaId _company)
+    {
+        BatchHeader batchHeader;
+        RefRecId    batchJobId;
+        str         errorText;
+
+        changecompany (_company)
+        {
+            try
+            {
+                _task.batchInfo().parmCaption(_caption);
+
+                batchHeader = BatchHeader::construct();
+                batchHeader.parmCaption(_caption);
+                batchHeader.addTask(_task);
+                batchHeader.save();
+
+                batchJobId = batchHeader.parmBatchHeaderId();
+            }
+            catch (Exception::CLRError)
+            {
+                errorText = TEST_AutomationService::clrErrorText();
+            }
+            catch (Exception::Error)
+            {
+                errorText = TEST_AutomationService::lastInfologMessage();
+            }
+        }
+
+        return [batchJobId, errorText];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>startScenario</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Starts an integration the way ADF does, through SJPBatchJobService.start, and returns its
+    /// reply (ret 0 = OK, 999 = exception) and the batch job it created. _scenario is MD01, MD12
+    /// or MD31 (or 01, 12, 31). batchJobId is 0 when start created no job, for example when no
+    /// staging row is New.
+    /// </summary>
+    public str startScenario(str _scenario, str _fileName, int _numOfTasks, str _company, str _emailAddress)
+    {
+        TEST_AutomationJson         json       = TEST_AutomationJson::construct();
+        str                         batchId    = TEST_AutomationService::scenarioBatchId(_scenario);
+        DataAreaId                  company    = TEST_AutomationService::company(_company);
+        RefRecId                    lastJobId  = TEST_AutomationService::lastBatchJobId();
+        SJPBatchJobRequestContract  request    = new SJPBatchJobRequestContract();
+        SJPBatchJobResponseContract response;
+        RefRecId                    batchJobId;
+
+        request.parmBatchId(batchId);
+        request.parmFileName(_fileName);
+        request.parmNumOfTasks(_numOfTasks);
+        request.parmDataAreaId(company);
+        request.parmEmailAddress(_emailAddress);
+
+        response = new SJPBatchJobService().start(request);
+
+        // Only a successful start created a job; a rejected one (for example by the run lock)
+        // must not report a job someone else started in the meantime.
+        if (response.parmRet() == 0)
+        {
+            batchJobId = TEST_AutomationService::findStartedJob(TEST_AutomationService::scenarioTaskCaption(batchId), lastJobId, company);
+        }
+
+        json.beginObject();
+        json.addString('scenario', _scenario);
+        json.addString('batchId', batchId);
+        json.addString('company', company);
+        json.addString('fileName', _fileName);
+        json.addInt('numOfTasks', _numOfTasks);
+        json.addBool('ok', response.parmRet() == 0);
+        json.addInt('ret', response.parmRet());
+        json.addString('message', response.parmMessage());
+        json.addInt('batchJobId', batchJobId);
+        json.endObject();
+
+        return json.toString();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>batchJobStatus</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Status of a batch job: done is true once it is Finished, Error or Canceled. tasks lists
+    /// the current tasks (runtime tasks disappear once the job ends); history lists every task
+    /// run with its infolog, at most _maxLogLines lines per task (0 = 200).
+    /// </summary>
+    public str batchJobStatus(int64 _batchJobId, int _maxLogLines)
+    {
+        TEST_AutomationJson json     = TEST_AutomationJson::construct();
+        int                 maxLines = _maxLogLines > 0 ? _maxLogLines : #DefaultMaxLogLines;
+        BatchJob            batchJob;
+        Batch               batch;
+        BatchHistory        history;
+        int                 tasksInError = 0;
+        int                 historyInError = 0;
+
+        select firstonly batchJob
+            where batchJob.RecId == _batchJobId;
+
+        json.beginObject();
+        json.addInt('batchJobId', _batchJobId);
+        json.addBool('found', batchJob.RecId != 0);
+
+        if (batchJob.RecId)
+        {
+            json.addString('caption', batchJob.Caption);
+            json.addString('status', TEST_AutomationService::batchStatusName(batchJob.Status));
+            json.addBool('done', TEST_AutomationService::isEnded(batchJob.Status));
+            json.addString('company', batchJob.Company);
+            json.addDateTime('startUtc', batchJob.StartDateTime);
+            json.addDateTime('endUtc', batchJob.EndDateTime);
+            json.addInt('seconds', TEST_AutomationService::seconds(batchJob.StartDateTime, batchJob.EndDateTime));
+
+            json.beginArray('tasks');
+            while select batch
+                order by batch.RecId
+                where batch.BatchJobId == batchJob.RecId
+            {
+                json.beginObject();
+                json.addInt('taskId', batch.RecId);
+                json.addString('caption', batch.Caption);
+                json.addString('className', classId2Name(batch.ClassNumber));
+                json.addString('status', TEST_AutomationService::batchStatusName(batch.Status));
+                json.addDateTime('startUtc', batch.StartDateTime);
+                json.addDateTime('endUtc', batch.EndDateTime);
+                json.addInt('seconds', TEST_AutomationService::seconds(batch.StartDateTime, batch.EndDateTime));
+                json.endObject();
+
+                if (batch.Status == BatchStatus::Error)
+                {
+                    tasksInError++;
+                }
+            }
+            json.endArray();
+
+            json.beginArray('history');
+            while select history
+                order by history.RecId
+                where history.BatchJobId == batchJob.RecId
+            {
+                json.beginObject();
+                json.addInt('taskId', history.BatchId);
+                json.addString('caption', history.Caption);
+                json.addString('className', classId2Name(history.ClassNumber));
+                json.addString('status', TEST_AutomationService::batchStatusName(history.Status));
+                json.addDateTime('startUtc', history.StartDateTime);
+                json.addDateTime('endUtc', history.EndDateTime);
+                json.addInt('seconds', TEST_AutomationService::seconds(history.StartDateTime, history.EndDateTime));
+                json.addInt('infologSkipped', json.addInfolog('infolog', history.Info, maxLines));
+                json.endObject();
+
+                if (history.Status == BatchStatus::Error)
+                {
+                    historyInError++;
+                }
+            }
+            json.endArray();
+
+            json.addInt('tasksInError', tasksInError);
+            json.addInt('historyInError', historyInError);
+        }
+
+        json.endObject();
+
+        return json.toString();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>stagingStatus</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Staging rows per status, archived rows, the latest ExecutionId, sample error messages and
+    /// the run lock rows of MD12 or MD31, for _fileName (blank: every file) in _company.
+    /// </summary>
+    public str stagingStatus(str _scenario, str _fileName, str _company)
+    {
+        TEST_AutomationJson json    = TEST_AutomationJson::construct();
+        str                 batchId = TEST_AutomationService::scenarioBatchId(_scenario);
+        DataAreaId          company = TEST_AutomationService::company(_company);
+
+        changecompany (company)
+        {
+            json.beginObject();
+            json.addString('scenario', _scenario);
+            json.addString('company', company);
+            json.addString('fileName', _fileName);
+
+            switch (batchId)
+            {
+                case '12':
+                    TEST_AutomationService::addMD12Staging(json, _fileName);
+                    TEST_AutomationService::addRunLocks(json, #MD12LockScope);
+                    break;
+
+                case '31':
+                    TEST_AutomationService::addMD31Staging(json, _fileName);
+                    TEST_AutomationService::addRunLocks(json, #MD31LockScope);
+                    break;
+
+                default:
+                    throw error(strFmt('stagingStatus supports MD12 and MD31, not %1.', _scenario));
+            }
+
+            json.endObject();
+        }
+
+        return json.toString();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addMD12Staging</Name>
+				<Source><![CDATA[
+    private static void addMD12Staging(TEST_AutomationJson _json, str _fileName)
+    {
+        SJPMDInventCountingAddOn   counted;
+        SJPMDInventCountingAddOn   unassigned;
+        SJPMDInventCountingAddOn   latest;
+        SJPMDInventCountingAddOn   failed;
+        SJPMDInventCountingArchive archive;
+
+        _json.beginObject('staging');
+        while select count(RecId) from counted
+            group by counted.Status
+            where (!_fileName || counted.FileName == _fileName)
+        {
+            _json.addInt(enum2Symbol(enumNum(SJPMDInventCountingStatus), enum2int(counted.Status)), counted.RecId);
+        }
+        _json.endObject();
+
+        select count(RecId) from unassigned
+            where (!_fileName || unassigned.FileName == _fileName)
+               && unassigned.Status          == SJPMDInventCountingStatus::New
+               && unassigned.ProcessingGroup == 0;
+        _json.addInt('newUnassigned', unassigned.RecId);
+
+        select count(RecId) from archive
+            where (!_fileName || archive.FileName == _fileName);
+        _json.addInt('archived', archive.RecId);
+
+        select firstonly ExecutionId from latest
+            order by latest.ExecutionId desc
+            where (!_fileName || latest.FileName == _fileName);
+        _json.addString('latestExecutionId', latest.ExecutionId);
+
+        _json.beginArray('errors');
+        while select firstonly10 FileName, CountingDate, WarehouseId, ItemId, ErrorMessage from failed
+            order by failed.RecId
+            where (!_fileName || failed.FileName == _fileName)
+               && failed.Status == SJPMDInventCountingStatus::Error
+        {
+            _json.beginObject();
+            _json.addString('fileName', failed.FileName);
+            _json.addString('group', failed.CountingDate + '-' + failed.WarehouseId);
+            _json.addString('itemId', failed.ItemId);
+            _json.addString('message', subStr(failed.ErrorMessage, 1, 1000));
+            _json.endObject();
+        }
+        _json.endArray();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addMD31Staging</Name>
+				<Source><![CDATA[
+    private static void addMD31Staging(TEST_AutomationJson _json, str _fileName)
+    {
+        SJPMDItemMaster        counted;
+        SJPMDItemMaster        unassigned;
+        SJPMDItemMaster        latest;
+        SJPMDItemMaster        failed;
+        SJPMDItemMasterArchive archive;
+
+        _json.beginObject('staging');
+        while select count(RecId) from counted
+            group by counted.Status
+            where (!_fileName || counted.file_name == _fileName)
+        {
+            _json.addInt(enum2Symbol(enumNum(SJPMDInventImportStatus), enum2int(counted.Status)), counted.RecId);
+        }
+        _json.endObject();
+
+        select count(RecId) from unassigned
+            where (!_fileName || unassigned.file_name == _fileName)
+               && unassigned.Status          == SJPMDInventImportStatus::New
+               && unassigned.ProcessingGroup == 0;
+        _json.addInt('newUnassigned', unassigned.RecId);
+
+        select count(RecId) from archive
+            where (!_fileName || archive.file_name == _fileName);
+        _json.addInt('archived', archive.RecId);
+
+        select firstonly ExecutionId from latest
+            order by latest.ExecutionId desc
+            where (!_fileName || latest.file_name == _fileName);
+        _json.addString('latestExecutionId', latest.ExecutionId);
+
+        _json.beginArray('errors');
+        while select firstonly10 file_name, sku_cd, ErrorMessage from failed
+            order by failed.RecId
+            where (!_fileName || failed.file_name == _fileName)
+               && failed.Status == SJPMDInventImportStatus::Error
+        {
+            _json.beginObject();
+            _json.addString('fileName', failed.file_name);
+            _json.addString('sku', failed.sku_cd);
+            _json.addString('message', subStr(failed.ErrorMessage, 1, 1000));
+            _json.endObject();
+        }
+        _json.endArray();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addRunLocks</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The SJPMDIntegrationRunLock rows of the scope. A row left after the batch job ended is a
+    /// stale lock that blocks the next start; this service reports it but does not delete it.
+    /// </summary>
+    private static void addRunLocks(TEST_AutomationJson _json, SJPMDIntegrationLockScope _lockScope)
+    {
+        SJPMDIntegrationRunLock runLock;
+
+        _json.beginArray('runLocks');
+        while select runLock
+            where runLock.LockScope == _lockScope
+        {
+            _json.beginObject();
+            _json.addString('lockScope', runLock.LockScope);
+            _json.addString('lockKey', runLock.LockKey);
+            _json.addString('ownerContext', runLock.OwnerContext);
+            _json.addString('ownerToken', guid2Str(runLock.OwnerToken));
+            _json.addString('createdBy', runLock.CreatedBy);
+            _json.addDateTime('createdUtc', runLock.CreatedDateTime);
+            _json.endObject();
+        }
+        _json.endArray();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addAssembly</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Writes the modules of a loaded model assembly with their module version id (MVID). The X++
+    /// code is in the .netmodule files (Dynamics.AX.Thien.0.netmodule and so on), whose MVID
+    /// changes when the code is compiled again; the harness compares them with the same files in
+    /// the bin folder of the local build to tell whether the deployed build is the local one.
+    /// </summary>
+    private static void addAssembly(TEST_AutomationJson _json, str _name)
+    {
+        System.Array                   assemblies;
+        System.Array                   modules;
+        System.Reflection.Assembly     assembly;
+        System.Reflection.AssemblyName assemblyName;
+        System.Reflection.Module       module;
+        str                            location;
+        str                            fileTimeUtc;
+        str                            errorText;
+        container                      moduleList;
+        boolean                        found;
+        int                            i;
+        int                            m;
+
+        // Read everything first, so that a CLR error cannot leave half-written JSON.
+        try
+        {
+            assemblies = System.AppDomain::get_CurrentDomain().GetAssemblies();
+
+            for (i = 0; i < assemblies.get_Length() && !found; i++)
+            {
+                assembly     = assemblies.GetValue(i);
+                assemblyName = assembly.GetName();
+
+                if (assemblyName.get_Name() == _name)
+                {
+                    found    = true;
+                    location = assembly.get_IsDynamic() ? '' : assembly.get_Location();
+
+                    if (location && System.IO.File::Exists(location))
+                    {
+                        fileTimeUtc = System.IO.File::GetLastWriteTimeUtc(location).ToString('o');
+                    }
+
+                    modules = assembly.GetModules();
+
+                    for (m = 0; m < modules.get_Length(); m++)
+                    {
+                        module      = modules.GetValue(m);
+                        moduleList += [[module.get_Name(), module.get_ModuleVersionId().ToString()]];
+                    }
+                }
+            }
+        }
+        catch (Exception::CLRError)
+        {
+            errorText = TEST_AutomationService::clrErrorText();
+        }
+
+        _json.beginObject();
+        _json.addString('name', _name);
+        _json.addBool('loaded', found);
+        _json.addString('location', location);
+        _json.addString('fileTimeUtc', fileTimeUtc);
+        _json.addString('error', errorText);
+
+        _json.beginArray('modules');
+        for (m = 1; m <= conLen(moduleList); m++)
+        {
+            _json.beginObject();
+            _json.addString('name', conPeek(conPeek(moduleList, m), 1));
+            _json.addString('mvid', conPeek(conPeek(moduleList, m), 2));
+            _json.endObject();
+        }
+        _json.endArray();
+
+        _json.endObject();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>elementExists</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Whether "Class", "Class.method", "Table" or "Table.field" exists in the deployed application.
+    /// </summary>
+    private static boolean elementExists(str _element)
+    {
+        int          position   = strScan(_element, '.', 1, strLen(_element));
+        str          objectName = position ? subStr(_element, 1, position - 1) : _element;
+        str          memberName = position ? subStr(_element, position + 1, strLen(_element)) : '';
+        ClassId      classId    = className2Id(objectName);
+        TableId      tableId    = tableName2Id(objectName);
+        SysDictClass dictClass;
+
+        if (classId)
+        {
+            if (!memberName)
+            {
+                return true;
+            }
+
+            dictClass = new SysDictClass(classId);
+
+            return dictClass.hasObjectMethod(memberName) || dictClass.hasStaticMethod(memberName);
+        }
+
+        if (tableId)
+        {
+            return !memberName || fieldName2Id(tableId, memberName) != 0;
+        }
+
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>findStartedJob</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The first batch job of _company created after _afterJobId that has a task with
+    /// _taskCaption (any new job of the company when _taskCaption is blank). Batch job RecIds
+    /// grow, so a job above the id read just before the start call was created by that call,
+    /// as long as nobody else starts the same job in the same company at the same moment.
+    /// SJPBatchJobService.start does not return the job it creates, so it cannot be exact.
+    /// </summary>
+    private static RefRecId findStartedJob(str _taskCaption, RefRecId _afterJobId, DataAreaId _company)
+    {
+        BatchJob batchJob;
+        Batch    batch;
+
+        if (_taskCaption)
+        {
+            select firstonly RecId from batchJob
+                order by batchJob.RecId
+                where batchJob.RecId   > _afterJobId
+                   && batchJob.Company == _company
+                exists join batch
+                    where batch.BatchJobId == batchJob.RecId
+                       && batch.Caption    == _taskCaption;
+        }
+        else
+        {
+            select firstonly RecId from batchJob
+                order by batchJob.RecId
+                where batchJob.RecId   > _afterJobId
+                   && batchJob.Company == _company;
+        }
+
+        return batchJob.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>lastBatchJobId</Name>
+				<Source><![CDATA[
+    private static RefRecId lastBatchJobId()
+    {
+        BatchJob batchJob;
+
+        select maxOf(RecId) from batchJob
+            where batchJob.RecId > 0;
+
+        return batchJob.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>scenarioBatchId</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The BatchId of SJPBatchJobRequestContract for a scenario name.
+    /// </summary>
+    private static str scenarioBatchId(str _scenario)
+    {
+        switch (strUpr(_scenario))
+        {
+            case 'MD01', '01':
+                return '01';
+            case 'MD12', '12':
+                return '12';
+            case 'MD31', '31':
+                return '31';
+            default:
+                throw error(strFmt('Unknown scenario %1. Use MD01, MD12 or MD31.', _scenario));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>scenarioTaskCaption</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The caption that the scenario's createBatchHeaderAndTasks gives its first task. MD01
+    /// creates up to two jobs with other captions, so any new job is taken.
+    /// </summary>
+    private static str scenarioTaskCaption(str _batchId)
+    {
+        switch (_batchId)
+        {
+            case '12':
+                return "@SJP:MDInventCountingBatch_Caption";
+            case '31':
+                return "@SJP:MDItemMasterImportBatch_Caption";
+            default:
+                return '';
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>company</Name>
+				<Source><![CDATA[
+    private static DataAreaId company(str _company)
+    {
+        DataAreaId company = _company ? _company : curExt();
+
+        if (!xDataArea::exist(company))
+        {
+            throw error(strFmt('Company %1 does not exist.', company));
+        }
+
+        return company;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>verdict</Name>
+				<Source><![CDATA[
+    private static str verdict(boolean _ok, str _summary)
+    {
+        if (!_ok)
+        {
+            return 'ERROR';
+        }
+
+        switch (subStr(_summary, 1, 4))
+        {
+            case 'PASS':
+                return 'PASS';
+            case 'FAIL':
+                return 'FAIL';
+            default:
+                return 'DONE';
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>batchStatusName</Name>
+				<Source><![CDATA[
+    private static str batchStatusName(BatchStatus _status)
+    {
+        return enum2Symbol(enumNum(BatchStatus), enum2int(_status));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isEnded</Name>
+				<Source><![CDATA[
+    private static boolean isEnded(BatchStatus _status)
+    {
+        return _status == BatchStatus::Finished
+            || _status == BatchStatus::Error
+            || _status == BatchStatus::Canceled;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seconds</Name>
+				<Source><![CDATA[
+    private static int64 seconds(utcdatetime _start, utcdatetime _end)
+    {
+        return _start && _end ? DateTimeUtil::getDifference(_end, _start) : 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>infologSince</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// A copy of the infolog lines written after _startLine; the infolog itself is kept.
+    /// </summary>
+    private static container infologSince(int _startLine)
+    {
+        int lastLine = infologLine();
+
+        return lastLine > _startLine ? infolog.copy(_startLine + 1, lastLine) : conNull();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>lastInfologMessage</Name>
+				<Source><![CDATA[
+    private static str lastInfologMessage()
+    {
+        int lastLine = infologLine();
+
+        return lastLine ? infolog.text(lastLine) : '';
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clrErrorText</Name>
+				<Source><![CDATA[
+    private static str clrErrorText()
+    {
+        System.Exception clrException = CLRInterop::getLastException();
+
+        return clrException ? subStr(clrException.ToString(), 1, 2000) : 'CLR error';
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

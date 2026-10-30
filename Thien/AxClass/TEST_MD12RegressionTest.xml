@@ -12,8 +12,16 @@
 /// Everything a test writes, including the posted counting journals, is rolled back
 /// afterwards (TestTransactionMode::AutoRollback). Run from Visual Studio Test Explorer.
 ///
-/// Not covered: the batch job itself, the split into processing groups across threads
-/// (SJPMDInventCountingService.assignProcessingGroups is private), and the summary email.
+/// TC11-TC12 cover the pending-row counts the worker and final tasks use; TC13-TC15 the run
+/// lock in SJPMDInventCountingService.orchestrate; TC16-TC19 the split into processing groups
+/// by warehouse (assignProcessingGroups, called through TEST_MD12GroupAssigningService); TC20
+/// the thread-count range of the contract. Their rows use made-up warehouses and files named
+/// TEST_MD12_TCnn or TEST_MD12_GRP_TCnn, outside the TEST_MD12_RT* rows TEST_MD12RetryTest deletes.
+///
+/// Not covered here: the retry and per-journal-group isolation in processJournalGroupSafe.
+/// This class runs inside the auto-rollback transaction, where X++ skips the catch blocks of
+/// code under test; those cases are in TEST_MD12RetryTest. Also not covered: the batch tasks
+/// (internal to SJP), the thread cap in orchestrate (needs a batch job), and the summary email.
 /// </summary>
 [SysTestTarget(classStr(SJPMDInventCountingBatchService), UtilElementType::Class)]
 [SysTestTransaction(TestTransactionMode::AutoRollback)]
@@ -36,10 +44,16 @@ public final class TEST_MD12RegressionTest extends SysTestCase
 
     // Seeded rows go into processing group 0 until the orchestrator assigns them.
     #define.UnassignedGroup(0)
+    // Must match the macros in SJPMDInventCountingService.
+    #define.MD12LockScope('MD12.InventCounting')
+    #define.MD12LockKey('Process')
+    #define.CountingDate('20260101')
 
     // Archived rows per file name before the worker ran. The seeding jobs purge
     // staging only, so archive rows from earlier manual runs of the same file remain.
     Map archivedBefore;
+    // Voucher numbers of the rows seedRow inserts.
+    int voucherCounter;
 }
 ]]></Declaration>
 		<Methods>
@@ -321,16 +335,17 @@ public final class TEST_MD12RegressionTest extends SysTestCase
 				<Name>tc09_badGroup_isolatedAndGoodGroupPosted</Name>
 				<Source><![CDATA[
     /// <summary>
-    /// TC09: one file with a good group (today) and a group with an unknown item
-    /// (yesterday). The bad group must end in Error with its flag and a message, and
-    /// the good group must still be posted and archived.
+    /// TC09: one file with a good group (yesterday) and a group with an unknown item
+    /// (today). The bad group must end in Error with its flag and a message, and the good group
+    /// must still be posted and archived. (With the bad group first, the date-order rule would
+    /// hold the good group back; TEST_MD12RetryTest TC33 covers that.)
     /// </summary>
     [SysTestMethod]
     public void tc09_badGroup_isolatedAndGoodGroupPosted()
     {
         SJPMDInventCountingAddOn addOn;
-        SJPMDInventCountingDate  goodDate = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
-        SJPMDInventCountingDate  badDate  = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet() - 1);
+        SJPMDInventCountingDate  goodDate = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet() - 1);
+        SJPMDInventCountingDate  badDate  = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
 
         TEST_MD12SeedingJob09::seed();
         int64 seededGood = this.stagingRowsOnDate(#FileTC09, goodDate);
@@ -368,8 +383,8 @@ public final class TEST_MD12RegressionTest extends SysTestCase
 				<Source><![CDATA[
     /// <summary>
     /// TC10: eight journal groups in one file (eight counting dates) - eight journals.
-    /// The case's other purpose, spreading the groups over threads, is done by the
-    /// private SJPMDInventCountingService.assignProcessingGroups and is not covered here.
+    /// All eight are in one warehouse, so assignProcessingGroups keeps them in one processing
+    /// group whatever the thread count; TC19 covers that.
     /// </summary>
     [SysTestMethod]
     public void tc10_eightGroups_eightJournals()
@@ -382,6 +397,608 @@ public final class TEST_MD12RegressionTest extends SysTestCase
 
         this.assertFileCompleted(#FileTC10, seeded);
         this.assertJournals(watermark, 8);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc11_countPendingRows_filtersGroupAndFile</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC11: countPendingRows, which SJPMDInventCountingBatchTask uses to fail a group that left
+    /// rows behind, counts only New rows of the given group and file.
+    /// </summary>
+    [SysTestMethod]
+    public void tc11_countPendingRows_filtersGroupAndFile()
+    {
+        const SJPMDInventCountingFileName FileA = 'TEST_MD12_TC11_A';
+        const SJPMDInventCountingFileName FileB = 'TEST_MD12_TC11_B';
+        SJPMDInventCountingBatchService service = new SJPMDInventCountingBatchService();
+
+        this.seedRow(FileA, 'Z11W01', 3);
+        this.seedRow(FileA, 'Z11W01', 3);
+        this.seedRow(FileA, 'Z11W01', 3, SJPMDInventCountingStatus::Error);
+        this.seedRow(FileA, 'Z11W02', 4);
+        this.seedRow(FileB, 'Z11W01', 3);
+
+        this.assertEquals(2, int642int(service.countPendingRows(3, FileA)), 'Group 3 of file A: two New rows; the Error row does not count');
+        this.assertEquals(1, int642int(service.countPendingRows(4, FileA)), 'Group 4 of file A');
+        this.assertEquals(1, int642int(service.countPendingRows(3, FileB)), 'Group 3 of file B');
+        this.assertEquals(0, int642int(service.countPendingRows(5, FileA)), 'A group without rows');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc12_countPendingRowsForExecutionIds_countsOnlyNew</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC12: countPendingRowsForExecutionIds, which the final task uses to report rows a run
+    /// left unprocessed, sums the New rows of the given execution ids and skips blank ids.
+    /// seedRow uses the file name as the ExecutionId.
+    /// </summary>
+    [SysTestMethod]
+    public void tc12_countPendingRowsForExecutionIds_countsOnlyNew()
+    {
+        const SJPMDInventCountingFileName FileA = 'TEST_MD12_TC12_A';
+        const SJPMDInventCountingFileName FileB = 'TEST_MD12_TC12_B';
+
+        this.seedRow(FileA, 'Z12W01');
+        this.seedRow(FileA, 'Z12W01', 0, SJPMDInventCountingStatus::Error);
+        this.seedRow(FileB, 'Z12W02');
+
+        this.assertEquals(2, int642int(SJPMDInventCountingBatchService::countPendingRowsForExecutionIds([FileA, FileB, ''])), 'New rows of both execution ids');
+        this.assertEquals(1, int642int(SJPMDInventCountingBatchService::countPendingRowsForExecutionIds([FileA])), 'The Error row does not count');
+        this.assertEquals(0, int642int(SJPMDInventCountingBatchService::countPendingRowsForExecutionIds(conNull())), 'No execution ids');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc13_orchestrate_lockHeldByOtherRun_isRefused</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC13: another run holds the MD12 run lock. orchestrate refuses to start instead of
+    /// resetting and reassigning that run's processing groups.
+    /// </summary>
+    [SysTestMethod]
+    public void tc13_orchestrate_lockHeldByOtherRun_isRefused()
+    {
+        SJPMDInventCountingContract contract;
+
+        this.assertMd12Unlocked();
+        this.assertTrue(SJPMDIntegrationRunLock::tryAcquire(#MD12LockScope, #MD12LockKey, newGuid(), 'TEST TC13 other run'),
+            'Arrange: the other run takes the lock');
+
+        contract = this.initContract('TEST_MD12_TC13');
+
+        this.parmExceptionExpected(true, strFmt("@SJP:SJPMDIntegrationRunLockAlreadyHeld", #MD12LockScope, #MD12LockKey));
+
+        new SJPMDInventCountingService().orchestrate(contract);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc14_orchestrate_ownLockWithoutRows_releasesLock</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC14: the usual path. createBatchHeaderAndTasks already took the lock with the contract's
+    /// RunId, so orchestrate accepts it; with no New rows for the file it releases the lock.
+    /// </summary>
+    [SysTestMethod]
+    public void tc14_orchestrate_ownLockWithoutRows_releasesLock()
+    {
+        SJPMDInventCountingContract contract;
+
+        this.assertMd12Unlocked();
+        contract = this.initContract('TEST_MD12_TC14');
+        this.assertTrue(SJPMDIntegrationRunLock::tryAcquire(#MD12LockScope, #MD12LockKey, contract.parmRunId(), 'TEST TC14 own run'),
+            'Arrange: this run takes the lock, as createBatchHeaderAndTasks does');
+
+        new SJPMDInventCountingService().orchestrate(contract);
+
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#MD12LockScope, #MD12LockKey), 'The run released its own lock');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc15_orchestrate_withoutLock_acquiresAndReleases</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC15: orchestrate started without createBatchHeaderAndTasks. No lock exists; orchestrate
+    /// takes it for this run and, with no New rows for the file, releases it again.
+    /// </summary>
+    [SysTestMethod]
+    public void tc15_orchestrate_withoutLock_acquiresAndReleases()
+    {
+        SJPMDInventCountingContract contract;
+
+        this.assertMd12Unlocked();
+        contract = this.initContract('TEST_MD12_TC15');
+
+        new SJPMDInventCountingService().orchestrate(contract);
+
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#MD12LockScope, #MD12LockKey), 'No lock is left behind');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc16_assignGroups_eightThreads_evenSplitByWarehouse</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC16: 20 warehouses on 8 threads. The split is even - the first 20 mod 8 = 4 groups take
+    /// one warehouse more - and each group is a run of consecutive warehouses.
+    /// </summary>
+    [SysTestMethod]
+    public void tc16_assignGroups_eightThreads_evenSplitByWarehouse()
+    {
+        const SJPMDInventCountingFileName TestFile        = 'TEST_MD12_GRP_TC16';
+        const str                         WarehousePrefix = 'Z16W';
+
+        this.seedWarehouses(TestFile, WarehousePrefix, 20);
+
+        TEST_MD12GroupAssigningService::construct().assign(8, TestFile);
+
+        this.assertGroupSizes(TestFile, WarehousePrefix, [3, 3, 3, 3, 2, 2, 2, 2]);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc17_assignGroups_oneThread_allInGroupOne</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC17: 1 thread. Every warehouse goes to group 1.
+    /// </summary>
+    [SysTestMethod]
+    public void tc17_assignGroups_oneThread_allInGroupOne()
+    {
+        const SJPMDInventCountingFileName TestFile        = 'TEST_MD12_GRP_TC17';
+        const str                         WarehousePrefix = 'Z17W';
+
+        this.seedWarehouses(TestFile, WarehousePrefix, 5);
+
+        TEST_MD12GroupAssigningService::construct().assign(1, TestFile);
+
+        this.assertGroupSizes(TestFile, WarehousePrefix, [5]);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc18_assignGroups_moreThreadsThanWarehouses_oneWarehousePerGroup</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC18: 16 threads for 5 warehouses. One group per warehouse (5 groups), so no worker task
+    /// is empty.
+    /// </summary>
+    [SysTestMethod]
+    public void tc18_assignGroups_moreThreadsThanWarehouses_oneWarehousePerGroup()
+    {
+        const SJPMDInventCountingFileName TestFile        = 'TEST_MD12_GRP_TC18';
+        const str                         WarehousePrefix = 'Z18W';
+
+        this.seedWarehouses(TestFile, WarehousePrefix, 5);
+
+        TEST_MD12GroupAssigningService::construct().assign(16, TestFile);
+
+        this.assertGroupSizes(TestFile, WarehousePrefix, [1, 1, 1, 1, 1]);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc19_assignGroups_warehouseJournalGroupsStayTogether_scopeRespected</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC19: all journal groups of one warehouse (three counting dates) share a group, even with
+    /// more threads than warehouses, so one worker posts them in date order; a stale group on a
+    /// New row is reassigned; a warehouse with only Error rows and a row of another file are
+    /// left as they are. File A has 2 warehouses with New rows, so 4 threads give 2 groups.
+    /// The earlier version split by journal group, so the three dates of W01 could run in three
+    /// worker tasks at the same time.
+    /// </summary>
+    [SysTestMethod]
+    public void tc19_assignGroups_warehouseJournalGroupsStayTogether_scopeRespected()
+    {
+        const SJPMDInventCountingFileName FileA = 'TEST_MD12_GRP_TC19_A';
+        const SJPMDInventCountingFileName FileB = 'TEST_MD12_GRP_TC19_B';
+
+        this.seedRow(FileA, 'Z19W01', 0, SJPMDInventCountingStatus::New, '20260101');
+        this.seedRow(FileA, 'Z19W01', 0, SJPMDInventCountingStatus::New, '20260102');
+        this.seedRow(FileA, 'Z19W01', 0, SJPMDInventCountingStatus::New, '20260103');
+        this.seedRow(FileA, 'Z19W02', 7);
+        this.seedRow(FileA, 'Z19W03', 9, SJPMDInventCountingStatus::Error);
+        this.seedRow(FileB, 'Z19W04');
+
+        TEST_MD12GroupAssigningService::construct().assign(4, FileA);
+
+        this.assertEquals(1, this.groupOf(FileA, 'Z19W01', '20260101'), 'W01, first date');
+        this.assertEquals(1, this.groupOf(FileA, 'Z19W01', '20260102'), 'W01, second date: same group');
+        this.assertEquals(1, this.groupOf(FileA, 'Z19W01', '20260103'), 'W01, third date: same group');
+        this.assertEquals(2, this.groupOf(FileA, 'Z19W02'), 'W02: the stale group 7 is reassigned');
+        this.assertEquals(9, this.groupOf(FileA, 'Z19W03'), 'W03: an Error row is not touched');
+        this.assertEquals(0, this.groupOf(FileB, 'Z19W04'), 'W04: a row of another file is not touched');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc20_contractValidate_threadCountBetweenOneAndMax</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC20: the contract accepts 1 to MaxNumOfThreads (32) threads and rejects 0 and 33.
+    /// orchestrate caps larger values from the ADF path, which skips validate; that path needs
+    /// a batch job and is checked in the sandbox.
+    /// </summary>
+    [SysTestMethod]
+    public void tc20_contractValidate_threadCountBetweenOneAndMax()
+    {
+        SJPMDInventCountingContract contract = new SJPMDInventCountingContract();
+
+        this.assertEquals(32, SJPMDInventCountingContract::MaxNumOfThreads, 'The agreed maximum');
+
+        contract.parmNumOfThreads(0);
+        this.assertFalse(contract.validate(), '0 threads');
+
+        contract.parmNumOfThreads(1);
+        this.assertTrue(contract.validate(), '1 thread');
+
+        contract.parmNumOfThreads(SJPMDInventCountingContract::MaxNumOfThreads);
+        this.assertTrue(contract.validate(), 'The maximum');
+
+        contract.parmNumOfThreads(SJPMDInventCountingContract::MaxNumOfThreads + 1);
+        this.assertFalse(contract.validate(), 'One above the maximum');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initContract</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// A contract for one file with its own RunId, as a new run has.
+    /// </summary>
+    private SJPMDInventCountingContract initContract(SJPMDInventCountingFileName _fileName)
+    {
+        SJPMDInventCountingContract contract = new SJPMDInventCountingContract();
+
+        contract.parmFileName(_fileName);
+        contract.parmNumOfThreads(1);
+        contract.parmRunId(newGuid());
+
+        return contract;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertMd12Unlocked</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The run lock is shared by all companies: a real MD12 run in progress would make the
+    /// lock tests meaningless, so stop at Arrange instead.
+    /// </summary>
+    private void assertMd12Unlocked()
+    {
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#MD12LockScope, #MD12LockKey),
+            'Arrange: an MD12 run holds the run lock in this environment; run the test when it has finished');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc38_adfStart_picksUpRowsWithAssignedGroup</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC38: rows left New by an earlier run keep the ProcessingGroup it gave them. The ADF entry
+    /// point SJPBatchJobService.start must still count them and schedule the MD12 batch job, so
+    /// that "run the batch again" works through ADF. Before the fix it counted only rows of
+    /// group 0 and scheduled nothing. The job and the run lock are rolled back with the test.
+    /// </summary>
+    [SysTestMethod]
+    public void tc38_adfStart_picksUpRowsWithAssignedGroup()
+    {
+        const SJPMDInventCountingFileName TestFile = 'TEST_MD12_TC38';
+        SJPBatchJobRequestContract        request  = new SJPBatchJobRequestContract();
+        SJPBatchJobResponseContract       response;
+        BatchJob                          batchJob;
+        Batch                             batch;
+        RefRecId                          lastJobId;
+        str                               message;
+
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#MD12LockScope, #MD12LockKey), 'Precondition: no MD12 run holds the lock');
+
+        this.seedRow(TestFile, 'Z38W01', 2);
+        this.seedRow(TestFile, 'Z38W02', 3);
+
+        select maxof(RecId) from batchJob
+            where batchJob.RecId > 0;
+        lastJobId = batchJob.RecId;
+
+        request.parmBatchId('12');
+        request.parmFileName(TestFile);
+        request.parmNumOfTasks(1);
+        request.parmDataAreaId(curExt());
+        response = new SJPBatchJobService().start(request);
+        message  = response.parmMessage();
+
+        this.assertEquals(0, response.parmRet(), message);
+        this.assertTrue(strScan(message, 'Counting record count: 2', 1, strLen(message)) > 0,
+            strFmt('Both rows are counted. Message: %1', message));
+
+        select firstonly RecId from batchJob
+            where batchJob.RecId > lastJobId
+            exists join batch
+                where batch.BatchJobId == batchJob.RecId
+                   && batch.Caption    == "@SJP:MDInventCountingBatch_Caption";
+        this.assertTrue(batchJob.RecId != 0, 'The MD12 batch job is scheduled');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc39_volumeVerify_lostRow_fails</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC39: the volume verifier must FAIL when the process lost a row. Seeds 3 rows, then moves
+    /// only 2 of them to the archive (as MD12 would, without journals). The verifier compares
+    /// with the seed's record in the ExecutionId, not with what is left, so it reports
+    /// "2 of 3 seeded rows found".
+    /// </summary>
+    [SysTestMethod]
+    public void tc39_volumeVerify_lostRow_fails()
+    {
+        const SJPMDInventCountingFileName TestFile = 'TEST_MD12_TC39';
+        str                               verdict;
+
+        TEST_MD12VolumeSeedJob::seed(1, 1, 3, TestFile);
+        this.archiveLikeMD12(TestFile, true, 0);
+
+        verdict = TEST_MD12VolumeVerifyJob::verify(TestFile);
+
+        this.assertEquals('FAIL', subStr(verdict, 1, 4), verdict);
+        this.assertTrue(strScan(verdict, '2 of 3 seeded rows found', 1, strLen(verdict)) > 0, verdict);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc40_volumeVerify_changedQuantity_fails</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC40: the volume verifier must FAIL when a counted quantity changed. Seeds 3 rows and
+    /// archives all of them, one with its quantity 1 higher: rows, groups and items still match
+    /// the seed, but the total counted quantity does not.
+    /// </summary>
+    [SysTestMethod]
+    public void tc40_volumeVerify_changedQuantity_fails()
+    {
+        const SJPMDInventCountingFileName TestFile = 'TEST_MD12_TC40';
+        str                               verdict;
+
+        TEST_MD12VolumeSeedJob::seed(1, 1, 3, TestFile);
+        this.archiveLikeMD12(TestFile, false, 1);
+
+        verdict = TEST_MD12VolumeVerifyJob::verify(TestFile);
+
+        this.assertEquals('FAIL', subStr(verdict, 1, 4), verdict);
+        this.assertTrue(strScan(verdict, 'total counted', 1, strLen(verdict)) > 0, verdict);
+        this.assertTrue(strScan(verdict, 'seeded rows found', 1, strLen(verdict)) == 0,
+            strFmt('All rows are there, so only the quantity check fails. Verdict: %1', verdict));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc41_volumeSeedStep_fileNameOnly_seedsThatFile</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC41: the automation step MD12.Seed.Volume with only arg4 (a file name) seeds that file
+    /// with the default sizes. Before the fix it ignored arg4, purged and seeded TEST_MD12_VOL01.
+    /// </summary>
+    [SysTestMethod]
+    public void tc41_volumeSeedStep_fileNameOnly_seedsThatFile()
+    {
+        const SJPMDInventCountingFileName TestFile    = 'TEST_MD12_TC41';
+        const SJPMDInventCountingFileName DefaultFile = 'TEST_MD12_VOL01';
+        int64                             defaultRows = this.stagingRows(DefaultFile, SJPMDInventCountingStatus::New);
+        str                               summary;
+
+        summary = TEST_AutomationStepRegistry::run('MD12.Seed.Volume', '', '', '', TestFile);
+
+        this.assertTrue(strScan(summary, 'file ' + TestFile, 1, strLen(summary)) > 0, summary);
+        this.assertTrue(this.stagingRows(TestFile, SJPMDInventCountingStatus::New) > 0, 'The given file is seeded');
+        this.assertEquals(defaultRows, this.stagingRows(DefaultFile, SJPMDInventCountingStatus::New), 'The default file is not touched');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>archiveLikeMD12</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Does to the file's staging rows what MD12 does after posting, without journals: copies
+    /// them to SJPMDInventCountingArchive as Completed and deletes them from staging.
+    /// _loseOne leaves the first row out of the archive; _qtyDelta is added to the first row's
+    /// quantity.
+    /// </summary>
+    private void archiveLikeMD12(SJPMDInventCountingFileName _fileName, boolean _loseOne, real _qtyDelta)
+    {
+        SJPMDInventCountingAddOn   addOn;
+        SJPMDInventCountingAddOn   addOnDelete;
+        SJPMDInventCountingArchive archive;
+        int                        rowNumber = 0;
+
+        ttsbegin;
+        while select addOn
+            order by addOn.VoucherNumber
+            where addOn.FileName == _fileName
+        {
+            rowNumber++;
+
+            if (rowNumber == 1 && _loseOne)
+            {
+                continue;
+            }
+
+            archive.clear();
+            archive.CompanyCode   = addOn.CompanyCode;
+            archive.CountingDate  = addOn.CountingDate;
+            archive.CountryCode   = addOn.CountryCode;
+            archive.ExecutionId   = addOn.ExecutionId;
+            archive.FileName      = addOn.FileName;
+            archive.ItemId        = addOn.ItemId;
+            archive.LocationId    = addOn.LocationId;
+            archive.Quantity      = addOn.Quantity + (rowNumber == 1 ? _qtyDelta : 0);
+            archive.Status        = SJPMDInventCountingStatus::Completed;
+            archive.VoucherNumber = addOn.VoucherNumber;
+            archive.VoucherType   = addOn.VoucherType;
+            archive.WarehouseId   = addOn.WarehouseId;
+            archive.insert();
+        }
+
+        delete_from addOnDelete
+            where addOnDelete.FileName == _fileName;
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seedRow</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// One staging row with a made-up item and location, its own voucher, the file name as
+    /// ExecutionId, and the given group and status. For the group and count tests only: the
+    /// row is never processed.
+    /// </summary>
+    private void seedRow(SJPMDInventCountingFileName    _fileName,
+                         SJPMDInventCountingWarehouseId _warehouseId,
+                         int                            _processingGroup = 0,
+                         SJPMDInventCountingStatus      _status          = SJPMDInventCountingStatus::New,
+                         SJPMDInventCountingDate        _countingDate    = #CountingDate)
+    {
+        SJPMDInventCountingAddOn addOn;
+
+        voucherCounter++;
+
+        addOn.clear();
+        addOn.FileName        = _fileName;
+        addOn.ExecutionId     = _fileName;
+        addOn.VoucherNumber   = 'TG' + strRFix(int2Str(voucherCounter), 4, '0');
+        addOn.VoucherType     = 1;
+        addOn.CountingDate    = _countingDate;
+        addOn.WarehouseId     = _warehouseId;
+        addOn.LocationId      = 'TGLOC';
+        addOn.ItemId          = 'TGITEM';
+        addOn.Quantity        = 1;
+        addOn.CompanyCode     = curext();
+        addOn.Status          = _status;
+        addOn.ErrorFlag       = _status == SJPMDInventCountingStatus::Error ? NoYes::Yes : NoYes::No;
+        addOn.ProcessingGroup = _processingGroup;
+        addOn.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seedWarehouses</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// One New row for each of _count warehouses: _warehousePrefix + 01, 02, ...
+    /// </summary>
+    private void seedWarehouses(SJPMDInventCountingFileName _fileName, str _warehousePrefix, int _count)
+    {
+        int i;
+
+        for (i = 1; i <= _count; i++)
+        {
+            this.seedRow(_fileName, this.warehouseCode(_warehousePrefix, i));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>warehouseCode</Name>
+				<Source><![CDATA[
+    private SJPMDInventCountingWarehouseId warehouseCode(str _warehousePrefix, int _number)
+    {
+        return _warehousePrefix + strRFix(int2Str(_number), 2, '0');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertGroupSizes</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The warehouses seeded by seedWarehouses fill groups 1, 2, ... in WarehouseId order with
+    /// the given sizes, and no other group exists for the file.
+    /// </summary>
+    private void assertGroupSizes(SJPMDInventCountingFileName _fileName, str _warehousePrefix, container _groupSizes)
+    {
+        SJPMDInventCountingAddOn addOn;
+        int                      expectedGroup     = 1;
+        int                      warehousesInGroup = 0;
+        int                      warehouseCount    = 0;
+        int                      groupSize;
+        int                      i;
+
+        for (i = 1; i <= conLen(_groupSizes); i++)
+        {
+            groupSize       = conPeek(_groupSizes, i);
+            warehouseCount += groupSize;
+        }
+
+        for (i = 1; i <= warehouseCount; i++)
+        {
+            groupSize = conPeek(_groupSizes, expectedGroup);
+
+            if (warehousesInGroup == groupSize)
+            {
+                expectedGroup++;
+                warehousesInGroup = 0;
+            }
+
+            warehousesInGroup++;
+
+            this.assertEquals(expectedGroup, this.groupOf(_fileName, this.warehouseCode(_warehousePrefix, i)),
+                strFmt('Group of warehouse %1', this.warehouseCode(_warehousePrefix, i)));
+        }
+
+        select maxof(ProcessingGroup) from addOn
+            where addOn.FileName == _fileName;
+
+        this.assertEquals(conLen(_groupSizes), addOn.ProcessingGroup, 'Number of groups');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>groupOf</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The processing group of a warehouse's staging row; _countingDate picks one of several.
+    /// </summary>
+    private int groupOf(SJPMDInventCountingFileName    _fileName,
+                        SJPMDInventCountingWarehouseId _warehouseId,
+                        SJPMDInventCountingDate        _countingDate = '')
+    {
+        SJPMDInventCountingAddOn addOn;
+
+        select firstonly RecId, ProcessingGroup from addOn
+            where addOn.FileName    == _fileName
+               && addOn.WarehouseId == _warehouseId
+               && (!_countingDate || addOn.CountingDate == _countingDate);
+
+        this.assertTrue(addOn.RecId != 0, strFmt('No staging row for warehouse %1', _warehouseId));
+
+        return addOn.ProcessingGroup;
     }
 
 ]]></Source>

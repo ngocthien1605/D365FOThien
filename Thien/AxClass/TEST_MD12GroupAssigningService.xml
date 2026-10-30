@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12GroupAssigningService</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// Test seam for TEST_MD12RegressionTest. Exposes SJPMDInventCountingService.assignProcessingGroups,
+/// which orchestrate only runs inside a batch job, so a test can check the split without one.
+/// The method under test runs unchanged.
+/// </summary>
+public final class TEST_MD12GroupAssigningService extends SJPMDInventCountingService
+{
+    boolean countFails;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static TEST_MD12GroupAssigningService construct()
+    {
+        return new TEST_MD12GroupAssigningService();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assign</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Runs assignProcessingGroups in its own transaction, as orchestrate does.
+    /// </summary>
+    public void assign(int _numOfThreads, SJPMDInventCountingFileName _fileName)
+    {
+        ttsbegin;
+        this.assignProcessingGroups(_numOfThreads, _fileName);
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>failCountNewRows</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// countNewRows, the first query orchestrate runs after taking the run lock, throws an
+    /// error, as a failing SQL statement would.
+    /// </summary>
+    public void failCountNewRows()
+    {
+        countFails = true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>countNewRows</Name>
+				<Source><![CDATA[
+    protected int64 countNewRows(str _fileName)
+    {
+        if (countFails)
+        {
+            throw error('TEST: countNewRows fault');
+        }
+
+        return super(_fileName);
+    }
+
+]]></Source>
+			</Method>		</Methods>
+	</SourceCode>
+</AxClass>

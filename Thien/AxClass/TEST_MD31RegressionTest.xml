@@ -16,8 +16,16 @@
 /// and asserts with ATL queries and specifications. Everything is rolled back afterwards.
 ///
 /// Expected values are read off the MD31 code (they pin current behaviour), except where a
-/// method comment says otherwise. Not covered: the orchestrator (group assignment, run lock,
-/// batch tasks), the final task and the summary email.
+/// method comment says otherwise. TC16-TC17 cover the pending-row counts the worker and final
+/// tasks use; TC18-TC20 cover the run lock in SJPMDItemMasterImportService.orchestrate.
+/// TC29-TC34 cover the split into processing groups (assignProcessingGroups, called through
+/// TEST_MD31GroupAssigningService) and the thread-count range of the contract. Their files are
+/// named TEST_MD31_GRP_TCnn, outside the TEST_MD31_TC2* rows TEST_MD31RetryTest deletes.
+///
+/// Not covered here: the retry and per-SKU isolation in processSkuSafe. This class runs inside
+/// the auto-rollback transaction, where X++ skips the catch blocks of code under test; those
+/// cases are in TEST_MD31RetryTest. Also not covered: the batch tasks (internal to SJP), the
+/// thread cap in orchestrate (needs a batch job), and the summary email.
 /// </summary>
 [SysTestTarget(classStr(SJPMDItemMasterImportBatchService), UtilElementType::Class)]
 [SysTestTransaction(TestTransactionMode::AutoRollback)]
@@ -31,6 +39,9 @@ public final class TEST_MD31RegressionTest extends SysTestCase
     #define.TestCountry('JPN')
     #define.TestCountryIso('JP')
     #define.TestItemGroup('MD31TEST')
+    // Must match the macros in SJPMDItemMasterImportService.
+    #define.MD31LockScope('MD31.ItemMaster')
+    #define.MD31LockKey('Process')
 
     AtlDataRootNode              data;
     AtlDataInvent                invent;
@@ -525,6 +536,560 @@ public final class TEST_MD31RegressionTest extends SysTestCase
 
         select count(RecId) from product where product.DisplayProductNumber == Sku;
         this.assertTrue(product.RecId == 1, strFmt('Expected one product for the SKU, found %1', product.RecId));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc16_countPendingRows_filtersGroupAndFile</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC16: countPendingRows, which SJPMDItemMasterImportBatchTask uses to fail a group that
+    /// left rows behind, counts only New rows of the given group and file.
+    /// </summary>
+    [SysTestMethod]
+    public void tc16_countPendingRows_filtersGroupAndFile()
+    {
+        const Filename FileA = 'TEST_MD31_TC16_A';
+        const Filename FileB = 'TEST_MD31_TC16_B';
+        SJPMDItemMasterImportBatchService service = new SJPMDItemMasterImportBatchService();
+
+        md31.initRow(FileA, 'ZT31TC16S001').setProcessingGroup(3).save();
+        md31.initRow(FileA, 'ZT31TC16S002').setProcessingGroup(3).save();
+        md31.initRow(FileA, 'ZT31TC16S003').setProcessingGroup(3).setStatus(SJPMDInventImportStatus::Error).save();
+        md31.initRow(FileA, 'ZT31TC16S004').setProcessingGroup(4).save();
+        md31.initRow(FileB, 'ZT31TC16S005').setProcessingGroup(3).save();
+
+        this.assertEquals(2, int642int(service.countPendingRows(3, FileA)), 'Group 3 of file A: two New rows; the Error row does not count');
+        this.assertEquals(1, int642int(service.countPendingRows(4, FileA)), 'Group 4 of file A');
+        this.assertEquals(1, int642int(service.countPendingRows(3, FileB)), 'Group 3 of file B');
+        this.assertEquals(0, int642int(service.countPendingRows(5, FileA)), 'A group without rows');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc17_countPendingRowsForExecutionIds_countsOnlyNew</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC17: countPendingRowsForExecutionIds, which the final task uses to report rows a run
+    /// left unprocessed, sums the New rows of the given execution ids and skips blank ids.
+    /// initRow uses the file name as the ExecutionId.
+    /// </summary>
+    [SysTestMethod]
+    public void tc17_countPendingRowsForExecutionIds_countsOnlyNew()
+    {
+        const Filename FileA = 'TEST_MD31_TC17_A';
+        const Filename FileB = 'TEST_MD31_TC17_B';
+
+        md31.initRow(FileA, 'ZT31TC17S001').save();
+        md31.initRow(FileA, 'ZT31TC17S002').setStatus(SJPMDInventImportStatus::Error).save();
+        md31.initRow(FileB, 'ZT31TC17S003').save();
+
+        this.assertEquals(2, int642int(SJPMDItemMasterImportBatchService::countPendingRowsForExecutionIds([FileA, FileB, ''])), 'New rows of both execution ids');
+        this.assertEquals(1, int642int(SJPMDItemMasterImportBatchService::countPendingRowsForExecutionIds([FileA])), 'The Error row does not count');
+        this.assertEquals(0, int642int(SJPMDItemMasterImportBatchService::countPendingRowsForExecutionIds(conNull())), 'No execution ids');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc18_orchestrate_lockHeldByOtherRun_isRefused</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC18: another run holds the MD31 run lock. orchestrate - as a menu run calls it - refuses
+    /// to start instead of resetting and reassigning that run's processing groups.
+    /// </summary>
+    [SysTestMethod]
+    public void tc18_orchestrate_lockHeldByOtherRun_isRefused()
+    {
+        SJPMDItemMasterImportContract contract;
+
+        this.assertMd31Unlocked();
+        this.assertTrue(SJPMDIntegrationRunLock::tryAcquire(#MD31LockScope, #MD31LockKey, newGuid(), 'TEST TC18 other run'),
+            'Arrange: the other run takes the lock');
+
+        contract = this.initContract('TEST_MD31_TC18');
+
+        this.parmExceptionExpected(true, strFmt("@SJP:SJPMDIntegrationRunLockAlreadyHeld", #MD31LockScope, #MD31LockKey));
+
+        new SJPMDItemMasterImportService().orchestrate(contract);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc19_orchestrate_ownLockWithoutRows_releasesLock</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC19: the ADF path. createBatchHeaderAndTasks already took the lock with the contract's
+    /// RunId, so orchestrate accepts it; with no New rows for the file it releases the lock.
+    /// </summary>
+    [SysTestMethod]
+    public void tc19_orchestrate_ownLockWithoutRows_releasesLock()
+    {
+        SJPMDItemMasterImportContract contract;
+
+        this.assertMd31Unlocked();
+        contract = this.initContract('TEST_MD31_TC19');
+        this.assertTrue(SJPMDIntegrationRunLock::tryAcquire(#MD31LockScope, #MD31LockKey, contract.parmRunId(), 'TEST TC19 own run'),
+            'Arrange: this run takes the lock, as createBatchHeaderAndTasks does');
+
+        new SJPMDItemMasterImportService().orchestrate(contract);
+
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#MD31LockScope, #MD31LockKey), 'The run released its own lock');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc20_orchestrate_withoutLock_acquiresAndReleases</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC20: the menu path. No lock exists; orchestrate takes it for this run and, with no New
+    /// rows for the file, releases it again.
+    /// </summary>
+    [SysTestMethod]
+    public void tc20_orchestrate_withoutLock_acquiresAndReleases()
+    {
+        SJPMDItemMasterImportContract contract;
+
+        this.assertMd31Unlocked();
+        contract = this.initContract('TEST_MD31_TC20');
+
+        new SJPMDItemMasterImportService().orchestrate(contract);
+
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#MD31LockScope, #MD31LockKey), 'No lock is left behind');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc29_assignGroups_eightThreads_evenSplit</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC29: 20 SKUs on 8 threads. The split is even - the first 20 mod 8 = 4 groups take one
+    /// SKU more - and each group is a run of consecutive SKUs in sku_cd order.
+    /// </summary>
+    [SysTestMethod]
+    public void tc29_assignGroups_eightThreads_evenSplit()
+    {
+        const Filename TestFile  = 'TEST_MD31_GRP_TC29';
+        const str      SkuPrefix = 'ZT31TC29S';
+
+        this.seedSkus(TestFile, SkuPrefix, 20);
+
+        TEST_MD31GroupAssigningService::construct().assign(8, TestFile);
+
+        this.assertGroupSizes(TestFile, SkuPrefix, [3, 3, 3, 3, 2, 2, 2, 2]);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc30_assignGroups_oneThread_allInGroupOne</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC30: 1 thread. Every SKU goes to group 1.
+    /// </summary>
+    [SysTestMethod]
+    public void tc30_assignGroups_oneThread_allInGroupOne()
+    {
+        const Filename TestFile  = 'TEST_MD31_GRP_TC30';
+        const str      SkuPrefix = 'ZT31TC30S';
+
+        this.seedSkus(TestFile, SkuPrefix, 5);
+
+        TEST_MD31GroupAssigningService::construct().assign(1, TestFile);
+
+        this.assertGroupSizes(TestFile, SkuPrefix, [5]);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc31_assignGroups_moreThreadsThanSkus_oneSkuPerGroup</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC31: 16 threads for 5 SKUs. One group per SKU (5 groups), so no worker task is empty.
+    /// </summary>
+    [SysTestMethod]
+    public void tc31_assignGroups_moreThreadsThanSkus_oneSkuPerGroup()
+    {
+        const Filename TestFile  = 'TEST_MD31_GRP_TC31';
+        const str      SkuPrefix = 'ZT31TC31S';
+
+        this.seedSkus(TestFile, SkuPrefix, 5);
+
+        TEST_MD31GroupAssigningService::construct().assign(16, TestFile);
+
+        this.assertGroupSizes(TestFile, SkuPrefix, [1, 1, 1, 1, 1]);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc32_assignGroups_sixteenThreads_equalGroups</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC32: 48 SKUs on 16 threads divide exactly: 16 groups of 3. The rounded-up group size of
+    /// the earlier version gave fewer groups than threads for counts such as 100 SKUs on 16.
+    /// </summary>
+    [SysTestMethod]
+    public void tc32_assignGroups_sixteenThreads_equalGroups()
+    {
+        const Filename TestFile  = 'TEST_MD31_GRP_TC32';
+        const str      SkuPrefix = 'ZT31TC32S';
+
+        this.seedSkus(TestFile, SkuPrefix, 48);
+
+        TEST_MD31GroupAssigningService::construct().assign(16, TestFile);
+
+        this.assertGroupSizes(TestFile, SkuPrefix, [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc33_assignGroups_skuRowsStayTogether_scopeRespected</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC33: the rows of one SKU share a group and the SKU is counted once; a stale group on a
+    /// New row is reassigned; an Error row and a row of another file are left as they are.
+    /// File A has 4 New SKUs (S001 with two rows), so 2 threads give groups of 2 and 2.
+    /// </summary>
+    [SysTestMethod]
+    public void tc33_assignGroups_skuRowsStayTogether_scopeRespected()
+    {
+        const Filename FileA = 'TEST_MD31_GRP_TC33_A';
+        const Filename FileB = 'TEST_MD31_GRP_TC33_B';
+
+        md31.initRow(FileA, 'ZT31TC33S001').setCompanyCode('TEST1').save();
+        md31.initRow(FileA, 'ZT31TC33S001').setCompanyCode('TEST2').save();
+        md31.initRow(FileA, 'ZT31TC33S002').save();
+        md31.initRow(FileA, 'ZT31TC33S003').save();
+        md31.initRow(FileA, 'ZT31TC33S004').setProcessingGroup(7).save();
+        md31.initRow(FileA, 'ZT31TC33S005').setProcessingGroup(9).setStatus(SJPMDInventImportStatus::Error).save();
+        md31.initRow(FileB, 'ZT31TC33S006').save();
+
+        TEST_MD31GroupAssigningService::construct().assign(2, FileA);
+
+        this.assertEquals(1, this.groupOf(FileA, 'ZT31TC33S001', 'TEST1'), 'S001, first row');
+        this.assertEquals(1, this.groupOf(FileA, 'ZT31TC33S001', 'TEST2'), 'S001, second row: same group as the first');
+        this.assertEquals(1, this.groupOf(FileA, 'ZT31TC33S002'), 'S002: the SKU with two rows counts once, so S002 completes group 1');
+        this.assertEquals(2, this.groupOf(FileA, 'ZT31TC33S003'), 'S003');
+        this.assertEquals(2, this.groupOf(FileA, 'ZT31TC33S004'), 'S004: the stale group 7 is reassigned');
+        this.assertEquals(9, this.groupOf(FileA, 'ZT31TC33S005'), 'S005: an Error row is not touched');
+        this.assertEquals(0, this.groupOf(FileB, 'ZT31TC33S006'), 'S006: a row of another file is not touched');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc34_contractValidate_threadCountBetweenOneAndMax</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC34: the contract accepts 1 to MaxNumOfThreads (32) threads and rejects 0 and 33.
+    /// orchestrate caps larger values from the ADF path, which skips validate; that path needs
+    /// a batch job and is checked in the sandbox.
+    /// </summary>
+    [SysTestMethod]
+    public void tc34_contractValidate_threadCountBetweenOneAndMax()
+    {
+        SJPMDItemMasterImportContract contract = new SJPMDItemMasterImportContract();
+
+        this.assertEquals(32, SJPMDItemMasterImportContract::MaxNumOfThreads, 'The agreed maximum');
+
+        contract.parmNumOfThreads(0);
+        this.assertFalse(contract.validate(), '0 threads');
+
+        contract.parmNumOfThreads(1);
+        this.assertTrue(contract.validate(), '1 thread');
+
+        contract.parmNumOfThreads(SJPMDItemMasterImportContract::MaxNumOfThreads);
+        this.assertTrue(contract.validate(), 'The maximum');
+
+        contract.parmNumOfThreads(SJPMDItemMasterImportContract::MaxNumOfThreads + 1);
+        this.assertFalse(contract.validate(), 'One above the maximum');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seedSkus</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// One New input row for each of _count SKUs: _skuPrefix + 001, 002, ...
+    /// </summary>
+    private void seedSkus(Filename _fileName, str _skuPrefix, int _count)
+    {
+        int i;
+
+        for (i = 1; i <= _count; i++)
+        {
+            md31.initRow(_fileName, this.skuCode(_skuPrefix, i)).save();
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>skuCode</Name>
+				<Source><![CDATA[
+    private SJPMDItemMasterJANCode skuCode(str _skuPrefix, int _number)
+    {
+        return _skuPrefix + strRFix(int2Str(_number), 3, '0');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertGroupSizes</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The SKUs seeded by seedSkus fill groups 1, 2, ... in sku_cd order with the given sizes,
+    /// and no other group exists for the file.
+    /// </summary>
+    private void assertGroupSizes(Filename _fileName, str _skuPrefix, container _groupSizes)
+    {
+        SJPMDItemMaster itemMaster;
+        int             expectedGroup = 1;
+        int             skusInGroup   = 0;
+        int             skuCount      = 0;
+        int             groupSize;
+        int             i;
+
+        for (i = 1; i <= conLen(_groupSizes); i++)
+        {
+            groupSize = conPeek(_groupSizes, i);
+            skuCount += groupSize;
+        }
+
+        for (i = 1; i <= skuCount; i++)
+        {
+            groupSize = conPeek(_groupSizes, expectedGroup);
+
+            if (skusInGroup == groupSize)
+            {
+                expectedGroup++;
+                skusInGroup = 0;
+            }
+
+            skusInGroup++;
+
+            this.assertEquals(expectedGroup, this.groupOf(_fileName, this.skuCode(_skuPrefix, i)),
+                strFmt('Group of SKU %1', this.skuCode(_skuPrefix, i)));
+        }
+
+        select maxof(ProcessingGroup) from itemMaster
+            where itemMaster.file_name == _fileName;
+
+        this.assertEquals(conLen(_groupSizes), itemMaster.ProcessingGroup, 'Number of groups');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>groupOf</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The processing group of a SKU's input row; _companyCode picks one of several rows.
+    /// </summary>
+    private int groupOf(Filename _fileName, SJPMDItemMasterJANCode _sku, SJPMDItemMasterCompanyCode _companyCode = '')
+    {
+        SJPMDItemMaster itemMaster;
+
+        select firstonly RecId, ProcessingGroup from itemMaster
+            where itemMaster.file_name == _fileName
+               && itemMaster.sku_cd    == _sku
+               && (!_companyCode || itemMaster.crp_cd == _companyCode);
+
+        this.assertTrue(itemMaster.RecId != 0, strFmt('No input row for SKU %1', _sku));
+
+        return itemMaster.ProcessingGroup;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initContract</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// A contract for one file with its own RunId, as a new menu or ADF run has.
+    /// </summary>
+    private SJPMDItemMasterImportContract initContract(Filename _fileName)
+    {
+        SJPMDItemMasterImportContract contract = new SJPMDItemMasterImportContract();
+
+        contract.parmFileName(_fileName);
+        contract.parmNumOfThreads(1);
+        contract.parmRunId(newGuid());
+
+        return contract;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc39_adfStart_picksUpRowsWithAssignedGroup</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC39: input rows left New by an earlier run keep the ProcessingGroup it gave them. The
+    /// ADF entry point SJPBatchJobService.start must still count them and schedule the MD31 batch
+    /// job, so that "run the batch again" works through ADF. Before the fix it counted only rows
+    /// of group 0 and scheduled nothing. The job and the run lock are rolled back with the test.
+    /// </summary>
+    [SysTestMethod]
+    public void tc39_adfStart_picksUpRowsWithAssignedGroup()
+    {
+        const Filename              TestFile = 'TEST_MD31_TC39';
+        SJPBatchJobRequestContract  request  = new SJPBatchJobRequestContract();
+        SJPBatchJobResponseContract response;
+        BatchJob                    batchJob;
+        Batch                       batch;
+        RefRecId                    lastJobId;
+        str                         message;
+
+        this.assertMd31Unlocked();
+
+        md31.initRow(TestFile, 'ZT31TC39S001').setProcessingGroup(2).save();
+        md31.initRow(TestFile, 'ZT31TC39S002').setProcessingGroup(3).save();
+
+        select maxof(RecId) from batchJob
+            where batchJob.RecId > 0;
+        lastJobId = batchJob.RecId;
+
+        request.parmBatchId('31');
+        request.parmFileName(TestFile);
+        request.parmNumOfTasks(1);
+        request.parmDataAreaId(curExt());
+        response = new SJPBatchJobService().start(request);
+        message  = response.parmMessage();
+
+        this.assertEquals(0, response.parmRet(), message);
+        this.assertTrue(strScan(message, 'Item master record count: 2', 1, strLen(message)) > 0,
+            strFmt('Both rows are counted. Message: %1', message));
+
+        select firstonly RecId from batchJob
+            where batchJob.RecId > lastJobId
+            exists join batch
+                where batch.BatchJobId == batchJob.RecId
+                   && batch.Caption    == "@SJP:MDItemMasterImportBatch_Caption";
+        this.assertTrue(batchJob.RecId != 0, 'The MD31 batch job is scheduled');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc40_volumeVerify_lostRow_fails</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC40: the MD31 volume verifier must FAIL when the process lost a row. Seeds 3 SKUs, then
+    /// archives only 2 of them (as MD31 would, without products). The verifier compares with the
+    /// seed's record in the ExecutionId, so it reports "2 of 3 seeded rows found".
+    /// </summary>
+    [SysTestMethod]
+    public void tc40_volumeVerify_lostRow_fails()
+    {
+        const Filename TestFile = 'TEST_MD31_TC40';
+        str            verdict;
+
+        TEST_MD31VolumeSeedJob::seed(3, TestFile);
+        this.archiveLikeMD31(TestFile, true, 0);
+
+        verdict = TEST_MD31VolumeVerifyJob::verify(TestFile);
+
+        this.assertEquals('FAIL', subStr(verdict, 1, 4), verdict);
+        this.assertTrue(strScan(verdict, '2 of 3 seeded rows found', 1, strLen(verdict)) > 0, verdict);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc41_volumeVerify_changedPrice_fails</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC41: the MD31 volume verifier must FAIL when an input price changed on the way. Seeds 3
+    /// SKUs and archives all of them, one with its price 1 higher: the rows match the seed, but
+    /// the total price does not.
+    /// </summary>
+    [SysTestMethod]
+    public void tc41_volumeVerify_changedPrice_fails()
+    {
+        const Filename TestFile = 'TEST_MD31_TC41';
+        str            verdict;
+
+        TEST_MD31VolumeSeedJob::seed(3, TestFile);
+        this.archiveLikeMD31(TestFile, false, 1);
+
+        verdict = TEST_MD31VolumeVerifyJob::verify(TestFile);
+
+        this.assertEquals('FAIL', subStr(verdict, 1, 4), verdict);
+        this.assertTrue(strScan(verdict, 'total price', 1, strLen(verdict)) > 0, verdict);
+        this.assertTrue(strScan(verdict, 'seeded rows found', 1, strLen(verdict)) == 0,
+            strFmt('All rows are there, so the row check passes. Verdict: %1', verdict));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>archiveLikeMD31</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Does to the file's input rows what MD31 does after creating the products, without them:
+    /// copies them to SJPMDItemMasterArchive as Created and deletes them from the input.
+    /// _loseOne leaves the first SKU out of the archive; _priceDelta is added to the first SKU's
+    /// price.
+    /// </summary>
+    private void archiveLikeMD31(Filename _fileName, boolean _loseOne, real _priceDelta)
+    {
+        SJPMDItemMaster        itemMaster;
+        SJPMDItemMaster        itemMasterDelete;
+        SJPMDItemMasterArchive archive;
+        int                    rowNumber = 0;
+
+        ttsbegin;
+        while select itemMaster
+            order by itemMaster.sku_cd
+            where itemMaster.file_name == _fileName
+        {
+            rowNumber++;
+
+            if (rowNumber == 1 && _loseOne)
+            {
+                continue;
+            }
+
+            archive.clear();
+            archive.crp_cd      = itemMaster.crp_cd;
+            archive.sku_cd      = itemMaster.sku_cd;
+            archive.sku_name_en = itemMaster.sku_name_en;
+            archive.sku_name_lc = itemMaster.sku_name_lc;
+            archive.price       = itemMaster.price + (rowNumber == 1 ? _priceDelta : 0);
+            archive.file_name   = itemMaster.file_name;
+            archive.ExecutionId = itemMaster.ExecutionId;
+            archive.Status      = SJPMDInventImportStatus::Created;
+            archive.insert();
+        }
+
+        delete_from itemMasterDelete
+            where itemMasterDelete.file_name == _fileName;
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertMd31Unlocked</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The run lock is shared by all companies: a real MD31 run in progress would make the
+    /// lock tests meaningless, so stop at Arrange instead.
+    /// </summary>
+    private void assertMd31Unlocked()
+    {
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#MD31LockScope, #MD31LockKey),
+            'Arrange: an MD31 run holds the run lock in this environment; run the test when it has finished');
     }
 
 ]]></Source>

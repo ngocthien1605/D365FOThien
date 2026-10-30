@@ -1,0 +1,671 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
+	<Name>TEST_MD12RunTestData</Name>
+	<SourceCode>
+		<Methods xmlns="">
+			<Method>
+				<Name>classDeclaration</Name>
+				<Source><![CDATA[
+[Form]
+public class TEST_MD12RunTestData extends FormRun
+{
+}
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init()
+    {
+        super();
+
+        LogMessageOutput.text('');
+        element.setStatus(TEST_RunTestDataPreparationStatus::New);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setStatus</Name>
+				<Source><![CDATA[
+    private void setStatus(TEST_RunTestDataPreparationStatus _status)
+    {
+        switch (_status)
+        {
+            case TEST_RunTestDataPreparationStatus::New:
+                StatusOutput.text('New');
+                break;
+            case TEST_RunTestDataPreparationStatus::Error:
+                StatusOutput.text('Error');
+                break;
+            case TEST_RunTestDataPreparationStatus::Succeeded:
+                StatusOutput.text('Succeeded');
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>appendLog</Name>
+				<Source><![CDATA[
+    private void appendLog(str _message)
+    {
+        str logText = LogMessageOutput.text();
+
+        if (!_message)
+        {
+            return;
+        }
+
+        if (logText)
+        {
+            logText += '; ';
+        }
+
+        logText += _message;
+        LogMessageOutput.text(logText);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>appendInfologToLogMessage</Name>
+				<Source><![CDATA[
+    private void appendInfologToLogMessage()
+    {
+        SysInfologEnumerator    enumerator = SysInfologEnumerator::newData(infolog.cut());
+        SysInfologMessageStruct messageStruct;
+
+        while (enumerator.moveNext())
+        {
+            messageStruct = new SysInfologMessageStruct(enumerator.currentMessage());
+
+            if (messageStruct)
+            {
+                element.appendLog(messageStruct.message());
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runSeedingJob</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Runs one MD12 seeding job. Each job purges its own FileName first, so
+    /// pressing the same button twice is safe.
+    /// Seeding only - batch execution and journal verification are done by hand.
+    /// </summary>
+    private void runSeedingJob(int _jobNumber)
+    {
+        SJPMDInventCountingWarehouseId warehouseA = WarehouseAInput.text();
+        SJPMDInventCountingWarehouseId warehouseB = WarehouseBInput.text();
+        str                            result;
+
+        element.setStatus(TEST_RunTestDataPreparationStatus::New);
+        LogMessageOutput.text('');
+
+        infolog.clear();
+
+        try
+        {
+            switch (_jobNumber)
+            {
+                case 1:
+                    result = TEST_MD12SeedingJob01::seed(warehouseA, warehouseB);
+                    break;
+                case 2:
+                    result = TEST_MD12SeedingJob02::seed(warehouseA, warehouseB);
+                    break;
+                case 3:
+                    result = TEST_MD12SeedingJob03::seed(warehouseA, warehouseB);
+                    break;
+                case 4:
+                    result = TEST_MD12SeedingJob04::seed(warehouseA, warehouseB);
+                    break;
+                case 5:
+                    result = TEST_MD12SeedingJob05::seed(warehouseA, warehouseB);
+                    break;
+                case 6:
+                    result = TEST_MD12SeedingJob06::seed(warehouseA, warehouseB);
+                    break;
+                case 7:
+                    result = TEST_MD12SeedingJob07::seed(warehouseA, warehouseB);
+                    break;
+                case 8:
+                    result = TEST_MD12SeedingJob08::seed(warehouseA, warehouseB);
+                    break;
+                case 9:
+                    result = TEST_MD12SeedingJob09::seed(warehouseA, warehouseB);
+                    break;
+                case 10:
+                    result = TEST_MD12SeedingJob10::seed(warehouseA, warehouseB);
+                    break;
+                case 11:
+                    result = TEST_MD12VolumeSeedJob::seed();
+                    break;
+                case 12:
+                    result = TEST_MD12VolumeVerifyJob::verify();
+                    break;
+                default:
+                    throw error(strFmt('TEST_MD12: unknown seeding job %1.', _jobNumber));
+            }
+
+            element.appendLog(result);
+
+            // The verify job returns FAIL | ... instead of throwing.
+            element.setStatus(subStr(result, 1, 4) == 'FAIL'
+                ? TEST_RunTestDataPreparationStatus::Error
+                : TEST_RunTestDataPreparationStatus::Succeeded);
+        }
+        catch (Exception::CLRError)
+        {
+            error('TEST_MD12: CLR error while seeding.');
+            element.setStatus(TEST_RunTestDataPreparationStatus::Error);
+        }
+        catch (Exception::Error)
+        {
+            element.setStatus(TEST_RunTestDataPreparationStatus::Error);
+        }
+
+        element.appendInfologToLogMessage();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+		<DataSources xmlns="" />
+		<DataControls xmlns="">
+			<Control>
+				<Name>SeedJob1Button</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.runSeedingJob(1);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>SeedJob2Button</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.runSeedingJob(2);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>SeedJob3Button</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.runSeedingJob(3);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>SeedJob4Button</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.runSeedingJob(4);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>SeedJob5Button</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.runSeedingJob(5);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>SeedJob6Button</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.runSeedingJob(6);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>SeedJob7Button</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.runSeedingJob(7);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>SeedJob8Button</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.runSeedingJob(8);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>SeedJob9Button</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.runSeedingJob(9);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>SeedJob10Button</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.runSeedingJob(10);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>SeedVolumeButton</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.runSeedingJob(11);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>VerifyVolumeButton</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.runSeedingJob(12);
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>WarehouseAInput</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>validate</Name>
+						<Source><![CDATA[
+        public boolean validate()
+        {
+            return true;
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>WarehouseBInput</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>validate</Name>
+						<Source><![CDATA[
+        public boolean validate()
+        {
+            return true;
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+		</DataControls>
+		<Members xmlns="" />
+	</SourceCode>
+	<DataSources />
+	<Design>
+		<Caption xmlns="">MD12 - Seed inventory counting test data</Caption>
+		<Pattern xmlns="">Dialog</Pattern>
+		<PatternVersion xmlns="">1.2</PatternVersion>
+		<ShowDeleteButton xmlns="">No</ShowDeleteButton>
+		<ShowNewButton xmlns="">No</ShowNewButton>
+		<Style xmlns="">Dialog</Style>
+		<Controls xmlns="">
+			<AxFormControl xmlns=""
+				i:type="AxFormGroupControl">
+				<Name>FormGroupControl</Name>
+				<HeightMode>SizeToAvailable</HeightMode>
+				<Pattern>Custom</Pattern>
+				<Type>Group</Type>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>WarehouseAInput</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<Type>String</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>InventLocationId</ExtendedDataType>
+						<Label>Warehouse A (blank = first warehouse on the configured site)</Label>
+						<LabelPosition>Above</LabelPosition>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>WarehouseBInput</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<Type>String</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>InventLocationId</ExtendedDataType>
+						<Label>Warehouse B (used by jobs 4 and 7; blank = auto)</Label>
+						<LabelPosition>Above</LabelPosition>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormButtonGroupControl">
+						<Name>SeedButtonGroup</Name>
+						<Type>ButtonGroup</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<Controls>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonControl">
+								<Name>SeedJob1Button</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<HelpText>TC01: 1 file, 1 warehouse, 1 date, 1 item. Expect 1 journal with 1 line.</HelpText>
+								<Type>Button</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Text>Run seeding job 1</Text>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonControl">
+								<Name>SeedJob2Button</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<HelpText>TC02: 1 file, 1 warehouse, 1 date, 3 items. Expect 1 journal with 3 lines.</HelpText>
+								<Type>Button</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Text>Run seeding job 2</Text>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonControl">
+								<Name>SeedJob3Button</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<HelpText>TC03: same item on 3 vouchers. Expect 1 journal with 1 aggregated line (4+5+6=15).</HelpText>
+								<Type>Button</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Text>Run seeding job 3</Text>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonControl">
+								<Name>SeedJob4Button</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<HelpText>TC04: 1 file, 2 warehouses, 1 date. Expect 2 journals.</HelpText>
+								<Type>Button</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Text>Run seeding job 4</Text>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonControl">
+								<Name>SeedJob5Button</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<HelpText>TC05: 1 file, 1 warehouse, 2 counting dates. Expect 2 journals.</HelpText>
+								<Type>Button</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Text>Run seeding job 5</Text>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonControl">
+								<Name>SeedJob6Button</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<HelpText>TC06: 2 files, same warehouse and date. Expect 2 journals. Also use to test the FileName filter.</HelpText>
+								<Type>Button</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Text>Run seeding job 6</Text>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonControl">
+								<Name>SeedJob7Button</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<HelpText>TC07: 2 files x 2 warehouses, 1 date. Expect 4 journals.</HelpText>
+								<Type>Button</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Text>Run seeding job 7</Text>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonControl">
+								<Name>SeedJob8Button</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<HelpText>TC08: counted below on-hand. Expect 1 journal line with a negative Qty.</HelpText>
+								<Type>Button</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Text>Run seeding job 8</Text>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonControl">
+								<Name>SeedJob9Button</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<HelpText>TC15: one good group plus one bad group in the same file. Expect 1 journal posted and the bad rows left at Status = Error.</HelpText>
+								<Type>Button</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Text>Run seeding job 9</Text>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonControl">
+								<Name>SeedJob10Button</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<HelpText>TC16: 8 journal groups. Run the batch with NumOfThreads = 4 and check ProcessingGroup distribution.</HelpText>
+								<Type>Button</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Text>Run seeding job 10</Text>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonControl">
+								<Name>SeedVolumeButton</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<HelpText>Volume: about 10,000 rows in file TEST_MD12_VOL01 (50 warehouses x 2 dates x 100 items, real master data). Then run MD12 with FileName = TEST_MD12_VOL01.</HelpText>
+								<Type>Button</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Text>Seed volume test (10k rows)</Text>
+							</AxFormControl>
+							<AxFormControl xmlns=""
+								i:type="AxFormButtonControl">
+								<Name>VerifyVolumeButton</Name>
+								<AutoDeclaration>Yes</AutoDeclaration>
+								<HelpText>Volume: after the MD12 batch job ended, checks the latest TEST_MD12_VOL01 execution - rows New and Error, journals posted per group, lines, run lock, task times - and shows PASS or FAIL.</HelpText>
+								<Type>Button</Type>
+								<WidthMode>SizeToAvailable</WidthMode>
+								<FormControlExtension
+									i:nil="true" />
+								<Text>Verify volume test</Text>
+							</AxFormControl>
+						</Controls>
+						<Caption>Seeding jobs</Caption>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>StatusOutput</Name>
+						<AllowEdit>No</AllowEdit>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<Type>String</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>Name</ExtendedDataType>
+						<Label>Status</Label>
+						<LabelPosition>Above</LabelPosition>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>LogMessageOutput</Name>
+						<AllowEdit>No</AllowEdit>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<HeightMode>SizeToAvailable</HeightMode>
+						<Type>String</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>Notes</ExtendedDataType>
+						<Label>Log message</Label>
+						<LabelPosition>Above</LabelPosition>
+						<MultiLine>Yes</MultiLine>
+					</AxFormControl>
+				</Controls>
+				<AllowUserSetup>No</AllowUserSetup>
+				<Style>DialogContent</Style>
+			</AxFormControl>
+			<AxFormControl xmlns=""
+				i:type="AxFormButtonGroupControl">
+				<Name>FormButtonGroupControl</Name>
+				<Type>ButtonGroup</Type>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormCommandButtonControl">
+						<Name>FormCommandButtonOK</Name>
+						<Type>CommandButton</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Command>OK</Command>
+						<Text>OK</Text>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormCommandButtonControl">
+						<Name>FormCommandButtonCancel</Name>
+						<Type>CommandButton</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Command>Cancel</Command>
+						<SaveRecord>No</SaveRecord>
+					</AxFormControl>
+				</Controls>
+				<ArrangeMethod>HorizontalRight</ArrangeMethod>
+				<Style>DialogCommitContainer</Style>
+			</AxFormControl>
+		</Controls>
+	</Design>
+	<Parts />
+</AxForm>

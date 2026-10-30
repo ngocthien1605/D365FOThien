@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_AutomationStepRegistry</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// The test-data steps (seed and verify jobs) that TEST_AutomationService.runStep and
+/// queueStep can run by name. Each step calls an existing job and returns its one-line summary;
+/// a verify job's summary starts with PASS or FAIL.
+///
+/// Named steps:
+///   MD12.Seed.TC01 .. MD12.Seed.TC10   TEST_MD12SeedingJobNN::seed(arg1 = warehouse A, arg2 = warehouse B)
+///   MD12.Seed.Volume                   TEST_MD12VolumeSeedJob::seed(arg1 = warehouses, arg2 = counting dates,
+///                                      arg3 = items per group, arg4 = file name); give arg1-arg3 or none of
+///                                      them (default sizes, with arg4 as the file name when given)
+///   MD12.Verify.Volume                 TEST_MD12VolumeVerifyJob::verify(arg1 = file name, optional)
+///   MD31.Seed.Volume                   TEST_MD31VolumeSeedJob::seed(arg1 = rows, default 1000; arg2 = file name)
+///   MD31.Verify.Volume                 TEST_MD31VolumeVerifyJob::verify(arg1 = file name, optional)
+/// Any other job: "TEST_Class::method" calls that static method of a TEST_ class with the
+/// non-empty arguments as strings, so a new seed or verify job needs no change here.
+/// </summary>
+public final class TEST_AutomationStepRegistry
+{
+    #define.ClassPrefix('TEST_')
+    #define.Separator('::')
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>steps</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The named steps, as a container of [name, description] containers.
+    /// </summary>
+    public static container steps()
+    {
+        container result;
+        int       i;
+
+        for (i = 1; i <= 10; i++)
+        {
+            result += [[strFmt('MD12.Seed.TC%1', strRFix(int2Str(i), 2, '0')),
+                        strFmt('TEST_MD12SeedingJob%1::seed(arg1 = warehouse A, arg2 = warehouse B; both optional)', strRFix(int2Str(i), 2, '0'))]];
+        }
+
+        result += [['MD12.Seed.Volume',
+                    'TEST_MD12VolumeSeedJob::seed(arg1 = warehouses, arg2 = counting dates, arg3 = items per group, arg4 = file name); give arg1-arg3 or none of them (defaults 50 x 2 x 100; file arg4, or TEST_MD12_VOL01)']];
+        result += [['MD12.Verify.Volume',
+                    'TEST_MD12VolumeVerifyJob::verify(arg1 = file name, default TEST_MD12_VOL01); summary starts with PASS or FAIL']];
+        result += [['MD31.Seed.Volume',
+                    'TEST_MD31VolumeSeedJob::seed(arg1 = rows, arg2 = file name); defaults 1,000 rows (daily size; 150000 for the migration), TEST_MD31_VOL01']];
+        result += [['MD31.Verify.Volume',
+                    'TEST_MD31VolumeVerifyJob::verify(arg1 = file name, default TEST_MD31_VOL01); summary starts with PASS or FAIL']];
+        result += [['TEST_Class::method',
+                    'Any public static method of a TEST_ class, called with the non-empty arguments as strings']];
+
+        return result;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Runs the step in the current company and returns its summary. Throws when the step is
+    /// unknown or the job fails.
+    /// </summary>
+    public static str run(str _step, str _arg1 = '', str _arg2 = '', str _arg3 = '', str _arg4 = '')
+    {
+        switch (_step)
+        {
+            case 'MD12.Seed.TC01':
+                return TEST_MD12SeedingJob01::seed(_arg1, _arg2);
+            case 'MD12.Seed.TC02':
+                return TEST_MD12SeedingJob02::seed(_arg1, _arg2);
+            case 'MD12.Seed.TC03':
+                return TEST_MD12SeedingJob03::seed(_arg1, _arg2);
+            case 'MD12.Seed.TC04':
+                return TEST_MD12SeedingJob04::seed(_arg1, _arg2);
+            case 'MD12.Seed.TC05':
+                return TEST_MD12SeedingJob05::seed(_arg1, _arg2);
+            case 'MD12.Seed.TC06':
+                return TEST_MD12SeedingJob06::seed(_arg1, _arg2);
+            case 'MD12.Seed.TC07':
+                return TEST_MD12SeedingJob07::seed(_arg1, _arg2);
+            case 'MD12.Seed.TC08':
+                return TEST_MD12SeedingJob08::seed(_arg1, _arg2);
+            case 'MD12.Seed.TC09':
+                return TEST_MD12SeedingJob09::seed(_arg1, _arg2);
+            case 'MD12.Seed.TC10':
+                return TEST_MD12SeedingJob10::seed(_arg1, _arg2);
+
+            case 'MD12.Seed.Volume':
+                if (!_arg1 && !_arg2 && !_arg3)
+                {
+                    // Default sizes, for the given file when arg4 names one.
+                    return _arg4 ? TEST_MD12VolumeSeedJob::seedFile(_arg4) : TEST_MD12VolumeSeedJob::seed();
+                }
+
+                if (!_arg1 || !_arg2 || !_arg3)
+                {
+                    throw error('MD12.Seed.Volume: give arg1 (warehouses), arg2 (counting dates) and arg3 (items per group), or none of them.');
+                }
+
+                return _arg4
+                    ? TEST_MD12VolumeSeedJob::seed(str2Int(_arg1), str2Int(_arg2), str2Int(_arg3), _arg4)
+                    : TEST_MD12VolumeSeedJob::seed(str2Int(_arg1), str2Int(_arg2), str2Int(_arg3));
+
+            case 'MD12.Verify.Volume':
+                return _arg1
+                    ? TEST_MD12VolumeVerifyJob::verify(_arg1)
+                    : TEST_MD12VolumeVerifyJob::verify();
+
+            case 'MD31.Seed.Volume':
+                if (_arg2)
+                {
+                    return TEST_MD31VolumeSeedJob::seed(_arg1 ? str2Int(_arg1) : 1000, _arg2);
+                }
+
+                return _arg1
+                    ? TEST_MD31VolumeSeedJob::seed(str2Int(_arg1))
+                    : TEST_MD31VolumeSeedJob::seed();
+
+            case 'MD31.Verify.Volume':
+                return _arg1
+                    ? TEST_MD31VolumeVerifyJob::verify(_arg1)
+                    : TEST_MD31VolumeVerifyJob::verify();
+        }
+
+        return TEST_AutomationStepRegistry::runStaticMethod(_step, _arg1, _arg2, _arg3, _arg4);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runStaticMethod</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Runs a step written as "TEST_Class::method". Only classes with the TEST_ prefix are
+    /// allowed. The leading non-empty arguments are passed as strings.
+    /// </summary>
+    private static str runStaticMethod(str _step, str _arg1, str _arg2, str _arg3, str _arg4)
+    {
+        int          position = strScan(_step, #Separator, 1, strLen(_step));
+        ClassName    className;
+        str          methodName;
+        SysDictClass dictClass;
+        anytype      result;
+
+        if (!position)
+        {
+            throw error(strFmt('Unknown step %1. Use a named step from listSteps or TEST_Class::method.', _step));
+        }
+
+        className  = subStr(_step, 1, position - 1);
+        methodName = subStr(_step, position + strLen(#Separator), strLen(_step));
+
+        if (subStr(className, 1, strLen(#ClassPrefix)) != #ClassPrefix || !className2Id(className))
+        {
+            throw error(strFmt('Step %1: class %2 does not exist or does not start with %3.', _step, className, #ClassPrefix));
+        }
+
+        dictClass = new SysDictClass(className2Id(className));
+
+        if (!dictClass.hasStaticMethod(methodName))
+        {
+            throw error(strFmt('Step %1: %2 has no static method %3.', _step, className, methodName));
+        }
+
+        if (_arg4)
+        {
+            result = dictClass.callStatic(methodName, _arg1, _arg2, _arg3, _arg4);
+        }
+        else if (_arg3)
+        {
+            result = dictClass.callStatic(methodName, _arg1, _arg2, _arg3);
+        }
+        else if (_arg2)
+        {
+            result = dictClass.callStatic(methodName, _arg1, _arg2);
+        }
+        else if (_arg1)
+        {
+            result = dictClass.callStatic(methodName, _arg1);
+        }
+        else
+        {
+            result = dictClass.callStatic(methodName);
+        }
+
+        switch (typeOf(result))
+        {
+            case Types::String:
+            case Types::RString:
+            case Types::VarString:
+                return result;
+            case Types::Integer:
+            case Types::Int64:
+            case Types::Real:
+            case Types::Enum:
+                return any2Str(result);
+            default:
+                // A void method, or a value that has no plain text form.
+                return strFmt('%1 completed', _step);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

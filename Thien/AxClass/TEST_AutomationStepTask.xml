@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_AutomationStepTask</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// Runs one TEST_AutomationStepRegistry step as a batch task, for steps that run longer than a
+/// web service call should wait (for example a large MD12.Seed.Volume). TEST_AutomationService
+/// .queueStep schedules it; the step summary goes to the infolog, so it appears in the batch log
+/// that TEST_AutomationService.batchJobStatus returns. A failing step, or a summary that starts
+/// with FAIL, ends the task in Error.
+/// </summary>
+public final class TEST_AutomationStepTask extends RunBaseBatch implements BatchRetryable
+{
+    str step;
+    str arg1;
+    str arg2;
+    str arg3;
+    str arg4;
+
+    #define.CurrentVersion(1)
+    #localmacro.CurrentList
+        step,
+        arg1,
+        arg2,
+        arg3,
+        arg4
+    #endmacro
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>newStep</Name>
+				<Source><![CDATA[
+    public static TEST_AutomationStepTask newStep(str _step, str _arg1 = '', str _arg2 = '', str _arg3 = '', str _arg4 = '')
+    {
+        TEST_AutomationStepTask task = new TEST_AutomationStepTask();
+
+        task.parmStep(_step);
+        task.parmArgs(_arg1, _arg2, _arg3, _arg4);
+
+        return task;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmStep</Name>
+				<Source><![CDATA[
+    public str parmStep(str _step = step)
+    {
+        step = _step;
+
+        return step;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmArgs</Name>
+				<Source><![CDATA[
+    public void parmArgs(str _arg1, str _arg2, str _arg3, str _arg4)
+    {
+        arg1 = _arg1;
+        arg2 = _arg2;
+        arg3 = _arg3;
+        arg4 = _arg4;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        str summary = TEST_AutomationStepRegistry::run(step, arg1, arg2, arg3, arg4);
+
+        // A FAIL verdict ends the task in Error, so a queued verify step that fails is not a
+        // Finished batch job.
+        if (subStr(summary, 1, 4) == 'FAIL')
+        {
+            throw error(summary);
+        }
+        else
+        {
+            info(summary);
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pack</Name>
+				<Source><![CDATA[
+    public container pack()
+    {
+        return [#CurrentVersion, #CurrentList];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedClass)
+    {
+        Version version = RunBase::getVersion(_packedClass);
+
+        switch (version)
+        {
+            case #CurrentVersion:
+                [version, #CurrentList] = _packedClass;
+                break;
+            default:
+                return false;
+        }
+
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canGoBatchJournal</Name>
+				<Source><![CDATA[
+    protected boolean canGoBatchJournal()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isRetryable</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// A seed purges and re-inserts its rows, so a retry after a failure is not wanted.
+    /// </summary>
+    public boolean isRetryable()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    public static ClassDescription description()
+    {
+        return 'TEST automation step';
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

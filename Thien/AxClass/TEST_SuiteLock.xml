@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_SuiteLock</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// Runs one test class that commits data (TestTransactionMode::None) at a time across sessions:
+/// Visual Studio Test Explorer, the XppLoop harness and batch runs. Two runs of such a class
+/// delete each other's fixtures, because they share file names; parallelExecution(false) only
+/// serializes tests inside one runner.
+///
+/// A class takes the lock in setUpTestCase and releases it in tearDownTestCase. The lock is a
+/// SJPMDIntegrationRunLock row with LockScope = the class's scope (for example
+/// TEST.MD12RetryTest) and LockKey = Suite. A second run fails at once with the owner and start
+/// time. A lock older than an hour is left by a run that stopped before tearDownTestCase, and is
+/// taken over.
+///
+/// The start time is written at the front of OwnerContext ("2026-10-30T01:02:03|user|session"),
+/// because the row's CreatedDateTime reads as empty (seen on the UDE): judged by it, every lock
+/// looked stale and a second run took the first one's lock over. A lock whose OwnerContext has
+/// no start time is never taken over.
+/// </summary>
+public final class TEST_SuiteLock
+{
+    #define.LockKey('Suite')
+    #define.StaleHours(1)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>acquire</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Takes the lock of _scope and returns its owner token; throws when another run holds it.
+    /// </summary>
+    public static guid acquire(SJPMDIntegrationLockScope _scope)
+    {
+        guid                    token   = newGuid();
+        Description             context = TEST_SuiteLock::ownerContext(DateTimeUtil::utcNow());
+        SJPMDIntegrationRunLock runLock;
+        utcdatetime             since;
+
+        if (SJPMDIntegrationRunLock::tryAcquire(_scope, #LockKey, token, context))
+        {
+            return token;
+        }
+
+        select firstonly RecId, OwnerContext from runLock
+            where runLock.LockScope == _scope
+               && runLock.LockKey   == #LockKey;
+
+        since = TEST_SuiteLock::startTime(runLock.OwnerContext);
+
+        if (runLock.RecId
+         && since != DateTimeUtil::minValue()
+         && since < DateTimeUtil::addHours(DateTimeUtil::utcNow(), -#StaleHours))
+        {
+            warning(strFmt('%1: taking over a lock left since %2 UTC (%3).', _scope, since, runLock.OwnerContext));
+
+            ttsbegin;
+            delete_from runLock
+                where runLock.LockScope == _scope
+                   && runLock.LockKey   == #LockKey;
+            ttscommit;
+
+            if (SJPMDIntegrationRunLock::tryAcquire(_scope, #LockKey, token, context))
+            {
+                return token;
+            }
+        }
+
+        throw error(strFmt('%1 is already running (%2). Run it again when that run has ended; a lock older than %3 hour is taken over.',
+                           _scope, runLock.OwnerContext, #StaleHours));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>ownerContext</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// "start time|user|session": the start time in UTC as yyyy-mm-ddThh:mm:ss, first, so
+    /// startTime can read it back.
+    /// </summary>
+    public static Description ownerContext(utcdatetime _startTime)
+    {
+        return strFmt('%1|%2|%3', DateTimeUtil::toStr(_startTime), curUserId(), sessionId());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>startTime</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The start time at the front of an OwnerContext written by ownerContext, or the minimum
+    /// value when it has none.
+    /// </summary>
+    public static utcdatetime startTime(Description _ownerContext)
+    {
+        str start = subStr(_ownerContext, 1, 19);
+
+        if (strLen(start) == 19 && subStr(start, 5, 1) == '-' && subStr(start, 11, 1) == 'T' && subStr(_ownerContext, 20, 1) == '|')
+        {
+            return DateTimeUtil::parse(start);
+        }
+
+        return DateTimeUtil::minValue();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>release</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Releases the lock of _scope if _token owns it; does nothing for an empty token (the lock
+    /// was not taken).
+    /// </summary>
+    public static void release(SJPMDIntegrationLockScope _scope, guid _token)
+    {
+        if (_token != emptyGuid())
+        {
+            SJPMDIntegrationRunLock::release(_scope, #LockKey, _token);
+        }
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

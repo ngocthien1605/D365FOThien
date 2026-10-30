@@ -1,0 +1,492 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD31VolumeVerifyJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD31 volume test - verification. Run after the MD31 batch job for the file seeded by
+/// TEST_MD31VolumeSeedJob has ended. Checks the latest execution of the file and writes one
+/// infolog line per check, then a PASS or FAIL verdict:
+///   - rows still New (must be 0) and in Error (must be 0), archived as Created and as Updated;
+///   - rows and total price against the record the seed wrote into the ExecutionId (_R, _P), so
+///     rows MD31 lost fail the check;
+///   - for every archived SKU of the execution: the product (EcoResProduct, product number =
+///     sku_cd) and the released item (InventTable) exist, the English product name equals the
+///     input's sku_name_en, and the sales price (InventTableModule, Sales) equals its price;
+///   - whether an MD31 run lock row is left;
+///   - start, end and duration of each worker task of the latest MD31 batch job, and the most
+///     workers running at the same time (at least 2 required when there is more than one; the
+///     batch server runs a limited number of tasks at once, so not all of them overlap).
+/// The per-SKU checks are set-based (one count per check), so they stay fast at 150,000 SKUs.
+/// Reads only; changes nothing.
+/// </summary>
+public final class TEST_MD31VolumeVerifyJob
+{
+    #define.FileName('TEST_MD31_VOL01')
+    // Must match the macros in SJPMDItemMasterImportService.
+    #define.MD31LockScope('MD31.ItemMaster')
+    #define.MD31LockKey('Process')
+    #define.EnglishLanguage('en-us')
+    #define.MaxListed(5)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        TEST_MD31VolumeVerifyJob::verify();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>verify</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Verifies the latest execution of the file, writes the details to the infolog and
+    /// returns the one-line verdict.
+    /// </summary>
+    public static str verify(Filename _fileName = #FileName)
+    {
+        SJPMDInventCountingExecutionId executionId = TEST_MD31VolumeVerifyJob::latestExecutionId(_fileName);
+        int64                          expectedRows;
+        real                           expectedPrice;
+        int64                          rowsNew;
+        int64                          rowsError;
+        int64                          rowsCreated;
+        int64                          rowsUpdated;
+        int64                          rowsFound;
+        real                           inputPrice;
+        int64                          noProduct;
+        int64                          noReleasedItem;
+        int64                          wrongName;
+        int64                          wrongPrice;
+        container                      workers;
+        boolean                        lockLeft;
+        str                            failures = '';
+        str                            verdict;
+        SJPMDItemMaster                itemMaster;
+        SJPMDItemMasterArchive         archive;
+        SJPMDIntegrationRunLock        runLock;
+
+        if (!executionId)
+        {
+            throw error(strFmt('TEST_MD31: no input or archive rows for file %1. Run TEST_MD31VolumeSeedJob first.', _fileName));
+        }
+
+        expectedRows  = str2Int64(TEST_MD31VolumeVerifyJob::manifestValue(executionId, 'R'));
+        expectedPrice = str2Num(TEST_MD31VolumeVerifyJob::manifestValue(executionId, 'P'));
+
+        info(strFmt('VERIFY | file %1 | execution %2', _fileName, executionId));
+        info(strFmt('Seed | rows %1 | total price %2', expectedRows, expectedPrice));
+
+        if (!expectedRows)
+        {
+            failures += 'the ExecutionId has no seed record (_R, _P): seed again with TEST_MD31VolumeSeedJob; ';
+        }
+
+        // ── Rows ─────────────────────────────────────────────────────────────
+        rowsNew     = TEST_MD31VolumeVerifyJob::inputRows(executionId, SJPMDInventImportStatus::New);
+        rowsError   = TEST_MD31VolumeVerifyJob::inputRows(executionId, SJPMDInventImportStatus::Error);
+        rowsCreated = TEST_MD31VolumeVerifyJob::archivedRows(executionId, SJPMDInventImportStatus::Created);
+        rowsUpdated = TEST_MD31VolumeVerifyJob::archivedRows(executionId, SJPMDInventImportStatus::Updated);
+        rowsFound   = rowsNew + rowsError + rowsCreated + rowsUpdated;
+
+        select sum(price) from itemMaster
+            where itemMaster.ExecutionId == executionId;
+        inputPrice = itemMaster.price;
+
+        select sum(price) from archive
+            where archive.ExecutionId == executionId;
+        inputPrice += archive.price;
+
+        info(strFmt('Rows | seeded %1 | found %2 | archived Created %3 | archived Updated %4 | still New %5 | Error %6 | total price %7 of %8',
+                    expectedRows, rowsFound, rowsCreated, rowsUpdated, rowsNew, rowsError, inputPrice, expectedPrice));
+
+        // ── Every archived SKU against the real records ─────────────────────
+        noProduct      = TEST_MD31VolumeVerifyJob::archivedWithoutProduct(executionId);
+        noReleasedItem = TEST_MD31VolumeVerifyJob::archivedWithoutReleasedItem(executionId);
+        wrongName      = TEST_MD31VolumeVerifyJob::archivedWithOtherName(executionId);
+        wrongPrice     = TEST_MD31VolumeVerifyJob::archivedWithOtherPrice(executionId);
+
+        info(strFmt('Products | archived SKUs without a product %1 | without a released item %2 | with another English name %3 | with another sales price %4',
+                    noProduct, noReleasedItem, wrongName, wrongPrice));
+
+        TEST_MD31VolumeVerifyJob::reportErrors(executionId);
+
+        // ── Run lock and batch tasks ─────────────────────────────────────────
+        select firstonly RecId, OwnerContext from runLock
+            where runLock.LockScope == #MD31LockScope
+               && runLock.LockKey   == #MD31LockKey;
+        lockLeft = runLock.RecId != 0;
+        info(strFmt('Run lock | %1', lockLeft ? strFmt('a lock row is left (%1)', runLock.OwnerContext) : 'released'));
+
+        workers = TEST_MD31VolumeVerifyJob::reportBatchTasks();
+
+        // ── Verdict ──────────────────────────────────────────────────────────
+        if (expectedRows && rowsFound != expectedRows)
+        {
+            failures += strFmt('%1 of %2 seeded rows found in input and archive; ', rowsFound, expectedRows);
+        }
+        if (expectedRows && abs(inputPrice - expectedPrice) > 0.01)
+        {
+            failures += strFmt('total price %1, seeded %2; ', inputPrice, expectedPrice);
+        }
+        if (rowsNew)
+        {
+            failures += strFmt('%1 rows still New; ', rowsNew);
+        }
+        if (rowsError)
+        {
+            failures += strFmt('%1 rows in Error; ', rowsError);
+        }
+        if (noProduct || noReleasedItem || wrongName || wrongPrice)
+        {
+            failures += strFmt('archived SKUs: %1 without a product, %2 without a released item, %3 with another English name, %4 with another sales price; ',
+                               noProduct, noReleasedItem, wrongName, wrongPrice);
+        }
+        if (conPeek(workers, 1) == 0)
+        {
+            failures += 'no MD31 worker task found; ';
+        }
+        else if (conPeek(workers, 1) > 1 && conPeek(workers, 2) < 2)
+        {
+            failures += strFmt('the %1 worker tasks ran one after the other, not in parallel; ', conPeek(workers, 1));
+        }
+        if (lockLeft)
+        {
+            failures += 'run lock left; ';
+        }
+
+        verdict = failures
+            ? strFmt('FAIL | file %1 | %2', _fileName, failures)
+            : strFmt('PASS | file %1 | %2 SKUs archived (%3 Created, %4 Updated) with their product, released item, English name and sales price, %5 workers (up to %6 at once), %7 s, 0 New, 0 Error',
+                     _fileName, rowsCreated + rowsUpdated, rowsCreated, rowsUpdated, conPeek(workers, 1), conPeek(workers, 2), conPeek(workers, 3));
+
+        if (failures)
+        {
+            warning(verdict);
+        }
+        else
+        {
+            info(verdict);
+        }
+
+        return verdict;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>inputRows</Name>
+				<Source><![CDATA[
+    private static int64 inputRows(SJPMDInventCountingExecutionId _executionId, SJPMDInventImportStatus _status)
+    {
+        SJPMDItemMaster itemMaster;
+
+        select count(RecId) from itemMaster
+            where itemMaster.ExecutionId == _executionId
+               && itemMaster.Status      == _status;
+
+        return itemMaster.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>archivedRows</Name>
+				<Source><![CDATA[
+    private static int64 archivedRows(SJPMDInventCountingExecutionId _executionId, SJPMDInventImportStatus _status)
+    {
+        SJPMDItemMasterArchive archive;
+
+        select count(RecId) from archive
+            where archive.ExecutionId == _executionId
+               && archive.Status      == _status;
+
+        return archive.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>archivedWithoutProduct</Name>
+				<Source><![CDATA[
+    private static int64 archivedWithoutProduct(SJPMDInventCountingExecutionId _executionId)
+    {
+        SJPMDItemMasterArchive archive;
+        EcoResProduct          product;
+
+        select count(RecId) from archive
+            where archive.ExecutionId == _executionId
+            notexists join product
+                where product.DisplayProductNumber == archive.sku_cd;
+
+        return archive.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>archivedWithoutReleasedItem</Name>
+				<Source><![CDATA[
+    private static int64 archivedWithoutReleasedItem(SJPMDInventCountingExecutionId _executionId)
+    {
+        SJPMDItemMasterArchive archive;
+        InventTable            inventTable;
+
+        select count(RecId) from archive
+            where archive.ExecutionId == _executionId
+            notexists join inventTable
+                where inventTable.ItemId == archive.sku_cd;
+
+        return archive.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>archivedWithOtherName</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Archived SKUs whose product has no English name equal to the input's sku_name_en
+    /// (a SKU without a product counts in archivedWithoutProduct).
+    /// </summary>
+    private static int64 archivedWithOtherName(SJPMDInventCountingExecutionId _executionId)
+    {
+        SJPMDItemMasterArchive   archive;
+        EcoResProduct            product;
+        EcoResProductTranslation translation;
+
+        select count(RecId) from archive
+            where archive.ExecutionId == _executionId
+            join product
+                where product.DisplayProductNumber == archive.sku_cd
+            notexists join translation
+                where translation.Product    == product.RecId
+                   && translation.LanguageId == #EnglishLanguage
+                   && translation.Name       == archive.sku_name_en;
+
+        return archive.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>archivedWithOtherPrice</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Archived SKUs whose released item has no Sales price record equal to the input's price
+    /// (a SKU without a released item counts in archivedWithoutReleasedItem).
+    /// </summary>
+    private static int64 archivedWithOtherPrice(SJPMDInventCountingExecutionId _executionId)
+    {
+        SJPMDItemMasterArchive archive;
+        InventTable            inventTable;
+        InventTableModule      salesModule;
+
+        select count(RecId) from archive
+            where archive.ExecutionId == _executionId
+            join inventTable
+                where inventTable.ItemId == archive.sku_cd
+            notexists join salesModule
+                where salesModule.ItemId     == archive.sku_cd
+                   && salesModule.ModuleType == ModuleInventPurchSales::Sales
+                   && salesModule.Price      == archive.price;
+
+        return archive.RecId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reportErrors</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Lists the first error messages of the execution.
+    /// </summary>
+    private static void reportErrors(SJPMDInventCountingExecutionId _executionId)
+    {
+        SJPMDItemMaster itemMaster;
+        int             listed = 0;
+
+        while select sku_cd, ErrorMessage from itemMaster
+            order by itemMaster.sku_cd
+            where itemMaster.ExecutionId == _executionId
+               && itemMaster.Status      == SJPMDInventImportStatus::Error
+        {
+            warning(strFmt('Error | SKU %1 | %2', itemMaster.sku_cd, subStr(itemMaster.ErrorMessage, 1, 500)));
+            listed++;
+
+            if (listed >= #MaxListed)
+            {
+                break;
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>latestExecutionId</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The latest ExecutionId of the file in input or archive. The seed's ExecutionIds start with
+    /// the file name and a timestamp, so the highest one is the latest.
+    /// </summary>
+    private static SJPMDInventCountingExecutionId latestExecutionId(Filename _fileName)
+    {
+        SJPMDItemMaster        itemMaster;
+        SJPMDItemMasterArchive archive;
+
+        select firstonly ExecutionId from itemMaster
+            order by itemMaster.ExecutionId desc
+            where itemMaster.file_name == _fileName;
+
+        select firstonly ExecutionId from archive
+            order by archive.ExecutionId desc
+            where archive.file_name == _fileName;
+
+        return itemMaster.ExecutionId > archive.ExecutionId ? itemMaster.ExecutionId : archive.ExecutionId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>manifestValue</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The value after "_<tag>" in the ExecutionId the seed wrote (digits and a decimal point),
+    /// or '' when the tag is missing. R = rows, P = total price.
+    /// </summary>
+    private static str manifestValue(SJPMDInventCountingExecutionId _executionId, str _tag)
+    {
+        int length   = strLen(_executionId);
+        int position = strScan(_executionId, '_' + _tag, length, -length);
+        int endPosition;
+
+        if (!position)
+        {
+            return '';
+        }
+
+        position   += 2;
+        endPosition = position;
+
+        while (endPosition <= length && strFind(subStr(_executionId, endPosition, 1), '0123456789.', 1, 1))
+        {
+            endPosition++;
+        }
+
+        return subStr(_executionId, position, endPosition - position);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reportBatchTasks</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Start, end and duration of every worker task of the latest batch job that ran MD31 worker
+    /// tasks, read from the batch history (runtime tasks leave the Batch table when the job
+    /// ends). Returns [worker tasks, the most of them running at the same time, seconds from the
+    /// first start to the last end].
+    /// </summary>
+    private static container reportBatchTasks()
+    {
+        BatchHistory history;
+        ClassId      workerClass = className2Id('SJPMDItemMasterImportBatchTask');
+        RecId        batchJobId;
+        int64        seconds;
+        int          workerCount  = 0;
+        utcdatetime  earliestStart = DateTimeUtil::maxValue();
+        utcdatetime  latestEnd    = DateTimeUtil::minValue();
+        container    starts;
+        container    ends;
+        int          maxConcurrent;
+
+        select firstonly BatchJobId from history
+            order by history.BatchJobId desc
+            where history.ClassNumber == workerClass;
+        batchJobId = history.BatchJobId;
+
+        if (!batchJobId)
+        {
+            info('Batch | no MD31 worker task found');
+            return [0, false, 0];
+        }
+
+        info(strFmt('Batch | latest MD31 batch job %1', batchJobId));
+
+        while select Caption, Status, StartDateTime, EndDateTime from history
+            order by history.RecId
+            where history.BatchJobId  == batchJobId
+               && history.ClassNumber == workerClass
+        {
+            seconds = history.StartDateTime && history.EndDateTime
+                ? DateTimeUtil::getDifference(history.EndDateTime, history.StartDateTime)
+                : 0;
+
+            info(strFmt('Task | %1 | %2 | start %3 | end %4 | %5 s',
+                        history.Caption, history.Status, history.StartDateTime, history.EndDateTime, seconds));
+
+            workerCount++;
+            starts       += [history.StartDateTime];
+            ends         += [history.EndDateTime];
+            earliestStart = history.StartDateTime < earliestStart ? history.StartDateTime : earliestStart;
+            latestEnd     = history.EndDateTime > latestEnd ? history.EndDateTime : latestEnd;
+        }
+
+        maxConcurrent = TEST_MD31VolumeVerifyJob::maxConcurrent(starts, ends);
+        seconds       = DateTimeUtil::getDifference(latestEnd, earliestStart);
+        info(strFmt('Workers | %1 tasks | up to %2 at the same time | %3 s from the first start to the last end',
+                    workerCount, maxConcurrent, seconds));
+
+        return [workerCount, maxConcurrent, seconds];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>maxConcurrent</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The most tasks running at the same moment: for each start, the tasks that started at or
+    /// before it and had not ended yet. The batch server runs a limited number of tasks at once
+    /// (7 on the UDE), so not every worker overlaps every other one. Used by the MD12 and MD31
+    /// volume verifiers.
+    /// </summary>
+    public static int maxConcurrent(container _starts, container _ends)
+    {
+        int         best = 0;
+        int         running;
+        int         i;
+        int         j;
+        utcdatetime moment;
+
+        for (i = 1; i <= conLen(_starts); i++)
+        {
+            moment  = conPeek(_starts, i);
+            running = 0;
+
+            for (j = 1; j <= conLen(_starts); j++)
+            {
+                if (conPeek(_starts, j) <= moment && conPeek(_ends, j) > moment)
+                {
+                    running++;
+                }
+            }
+
+            best = max(best, running);
+        }
+
+        return best;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

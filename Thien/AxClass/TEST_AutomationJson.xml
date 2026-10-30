@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_AutomationJson</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// A small JSON writer for the replies of TEST_AutomationService, which the harness script
+/// Tools/XppLoop/Invoke-XppLoop.ps1 parses. Write a value with a name inside an object and
+/// with an empty name inside an array:
+///   json.beginObject(); json.addString('step', 'MD12.Seed.TC01');
+///   json.beginArray('infolog'); json.addString('', 'line 1'); json.endArray();
+///   json.endObject(); return json.toString();
+/// </summary>
+public final class TEST_AutomationJson
+{
+    System.Text.StringBuilder builder;
+    boolean                   needsComma;
+    str                       controlChars;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    public void new()
+    {
+        int i;
+
+        builder    = new System.Text.StringBuilder();
+        needsComma = false;
+
+        // Control characters other than tab, line feed and carriage return are dropped.
+        controlChars = '';
+        for (i = 1; i < 32; i++)
+        {
+            if (i != 9 && i != 10 && i != 13)
+            {
+                controlChars += num2Char(i);
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static TEST_AutomationJson construct()
+    {
+        return new TEST_AutomationJson();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>quote</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Returns _value as a JSON string literal, with quotes, backslashes, tabs and line breaks
+    /// escaped.
+    /// </summary>
+    public str quote(str _value)
+    {
+        str value = strRem(_value, controlChars);
+
+        value = strReplace(value, '\\', '\\\\');
+        value = strReplace(value, '"', '\\"');
+        value = strReplace(value, num2Char(13), '\\r');
+        value = strReplace(value, num2Char(10), '\\n');
+        value = strReplace(value, num2Char(9), '\\t');
+
+        return '"' + value + '"';
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>writeName</Name>
+				<Source><![CDATA[
+    private void writeName(str _name)
+    {
+        if (needsComma)
+        {
+            builder.Append(',');
+        }
+
+        if (_name)
+        {
+            builder.Append(this.quote(_name));
+            builder.Append(':');
+        }
+
+        needsComma = true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>beginObject</Name>
+				<Source><![CDATA[
+    public void beginObject(str _name = '')
+    {
+        this.writeName(_name);
+        builder.Append('{');
+        needsComma = false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>endObject</Name>
+				<Source><![CDATA[
+    public void endObject()
+    {
+        builder.Append('}');
+        needsComma = true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>beginArray</Name>
+				<Source><![CDATA[
+    public void beginArray(str _name = '')
+    {
+        this.writeName(_name);
+        builder.Append('[');
+        needsComma = false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>endArray</Name>
+				<Source><![CDATA[
+    public void endArray()
+    {
+        builder.Append(']');
+        needsComma = true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addString</Name>
+				<Source><![CDATA[
+    public void addString(str _name, str _value)
+    {
+        this.writeName(_name);
+        builder.Append(this.quote(_value));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addInt</Name>
+				<Source><![CDATA[
+    public void addInt(str _name, int64 _value)
+    {
+        this.writeName(_name);
+        builder.Append(int642Str(_value));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addBool</Name>
+				<Source><![CDATA[
+    public void addBool(str _name, boolean _value)
+    {
+        this.writeName(_name);
+        builder.Append(_value ? 'true' : 'false');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addDateTime</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Writes a UTC date and time as an ISO 8601 string ending in Z, or null when it is empty.
+    /// </summary>
+    public void addDateTime(str _name, utcdatetime _value)
+    {
+        this.writeName(_name);
+
+        if (_value == DateTimeUtil::minValue())
+        {
+            builder.Append('null');
+        }
+        else
+        {
+            builder.Append(this.quote(DateTimeUtil::toStr(_value) + 'Z'));
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addInfolog</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Writes infolog data as an array of { "type": "info|warning|error", "message": "..." }.
+    /// At most _maxLines lines are written; returns the number of lines left out.
+    /// </summary>
+    public int addInfolog(str _name, container _infologData, int _maxLines = 200)
+    {
+        SysInfologEnumerator    enumerator;
+        SysInfologMessageStruct messageStruct;
+        int                     lines   = 0;
+        int                     skipped = 0;
+
+        this.beginArray(_name);
+
+        if (conLen(_infologData))
+        {
+            enumerator = SysInfologEnumerator::newData(_infologData);
+
+            while (enumerator.moveNext())
+            {
+                if (lines >= _maxLines)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                messageStruct = new SysInfologMessageStruct(enumerator.currentMessage());
+
+                this.beginObject();
+                this.addString('type', TEST_AutomationJson::exceptionName(enumerator.currentException()));
+                this.addString('message', messageStruct.message());
+                this.endObject();
+                lines++;
+            }
+        }
+
+        this.endArray();
+
+        return skipped;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>exceptionName</Name>
+				<Source><![CDATA[
+    public static str exceptionName(Exception _exception)
+    {
+        switch (_exception)
+        {
+            case Exception::Info:
+                return 'info';
+            case Exception::Warning:
+                return 'warning';
+            case Exception::Error:
+                return 'error';
+            default:
+                return 'other';
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>toString</Name>
+				<Source><![CDATA[
+    public str toString()
+    {
+        return builder.ToString();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -1,0 +1,493 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12VolumeVerifyJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 volume test - verification. Run after the MD12 batch job for the file seeded by
+/// TEST_MD12VolumeSeedJob has ended. Checks the latest execution of the file and writes one
+/// infolog line per check, then a PASS or FAIL verdict:
+///   - staging rows still New (must be 0) and in Error (must be 0), archived rows;
+///   - journal groups (counting date + warehouse) seeded, journals created and posted for
+///     them, groups without a journal and groups with more than one (a double posting);
+///   - journal lines against the distinct items per group (MD12 sums an item into one line);
+///   - whether an MD12 run lock row is left;
+///   - start, end and duration of each task of the latest MD12 batch job, and the most worker tasks
+///     running at the same time (at least 2 required when there is more than one);
+///   - rows, journal groups, distinct group items and total counted quantity against the record
+///     the seed wrote into the ExecutionId, and each journal line's counted quantity against the
+///     archived input of its group and item.
+/// Journals of the run are counting journals of the MD12 journal name, created after the seed
+/// (RecId above the _J part of the ExecutionId), whose description is "date-warehouse".
+/// The expectations come from the seed, not from the rows MD12 leaves, so lost rows fail.
+/// Reads only; changes nothing.
+///
+/// Run from the browser: ?mi=SysClassRunner&cls=TEST_MD12VolumeVerifyJob, or from the form
+/// TEST_MD12RunTestData.
+/// </summary>
+public final class TEST_MD12VolumeVerifyJob
+{
+    #define.FileName('TEST_MD12_VOL01')
+    // Must match the macros in SJPMDInventCountingService.
+    #define.MD12LockScope('MD12.InventCounting')
+    #define.MD12LockKey('Process')
+    #define.MaxListed(5)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        TEST_MD12VolumeVerifyJob::verify();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>verify</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Verifies the latest execution of the file, writes the details to the infolog and
+    /// returns the one-line verdict. The expectations come from the seed (recorded in the
+    /// ExecutionId), not from the rows MD12 leaves behind, so lost rows or groups fail the check.
+    /// </summary>
+    public static str verify(SJPMDInventCountingFileName _fileName = #FileName)
+    {
+        SJPMDInventCountingExecutionId executionId = TEST_MD12VolumeVerifyJob::latestExecutionId(_fileName);
+        RecId                          watermark;
+        int64                          expectedRows;
+        int64                          expectedGroups;
+        int64                          expectedGroupItems;
+        real                           expectedCounted;
+        real                           inputCounted;
+        Set                            groups      = new Set(Types::String);
+        Set                            groupItems  = new Set(Types::String);
+        Set                            lineKeys    = new Set(Types::String);
+        Map                            archivedQty = new Map(Types::String, Types::Real);
+        Map                            journalsPerGroup = new Map(Types::String, Types::Integer);
+        int64                          rowsNew;
+        int64                          rowsError;
+        int64                          rowsArchived;
+        int                            journalsCreated = 0;
+        int                            journalsPosted  = 0;
+        int64                          journalLines    = 0;
+        int                            groupsWithoutJournal = 0;
+        int                            groupsWithSeveral    = 0;
+        int                            linesWithoutInput    = 0;
+        int                            linesWrongQty        = 0;
+        int                            inputsWithoutLine    = 0;
+        int                            qtyListed            = 0;
+        int                            errorGroups;
+        container                      workers;
+        boolean                        lockLeft;
+        str                            failures    = '';
+        str                            verdict;
+        str                            lineKey;
+        real                           expectedQty;
+        SetEnumerator                  se;
+        MapEnumerator                  me;
+        SJPMDInventCountingAddOn       addOn;
+        SJPMDInventCountingArchive     archive;
+        InventJournalTable             journalTable;
+        InventJournalTrans             journalTrans;
+        SJPMDIntegrationRunLock        runLock;
+        InventJournalNameId            journalNameId = SJPMDInventCountingParam::find().JournalNameId;
+        str                            key;
+        str                            unposted    = '';
+        int                            unpostedListed = 0;
+
+        if (!executionId)
+        {
+            throw error(strFmt('TEST_MD12: no staging or archive rows for file %1. Run TEST_MD12VolumeSeedJob first.', _fileName));
+        }
+
+        watermark          = str2Int64(TEST_MD12VolumeVerifyJob::manifestValue(executionId, 'J'));
+        expectedRows       = str2Int64(TEST_MD12VolumeVerifyJob::manifestValue(executionId, 'R'));
+        expectedGroups     = str2Int64(TEST_MD12VolumeVerifyJob::manifestValue(executionId, 'G'));
+        expectedGroupItems = str2Int64(TEST_MD12VolumeVerifyJob::manifestValue(executionId, 'I'));
+        expectedCounted    = str2Num(TEST_MD12VolumeVerifyJob::manifestValue(executionId, 'Q'));
+
+        info(strFmt('VERIFY | file %1 | execution %2 | journal name %3', _fileName, executionId, journalNameId));
+        info(strFmt('Seed | rows %1 | journal groups %2 | distinct group items %3 | total counted %4',
+                    expectedRows, expectedGroups, expectedGroupItems, expectedCounted));
+
+        if (!watermark || !expectedRows)
+        {
+            failures += 'the ExecutionId has no seed record (_J, _R, _G, _I, _Q): seed again with TEST_MD12VolumeSeedJob; ';
+        }
+
+        // ── Rows ─────────────────────────────────────────────────────────────
+        select count(RecId) from addOn
+            where addOn.ExecutionId == executionId
+               && addOn.Status      == SJPMDInventCountingStatus::New;
+        rowsNew = addOn.RecId;
+
+        select count(RecId) from addOn
+            where addOn.ExecutionId == executionId
+               && addOn.Status      == SJPMDInventCountingStatus::Error;
+        rowsError = addOn.RecId;
+
+        select count(RecId) from archive
+            where archive.ExecutionId == executionId
+               && archive.Status      == SJPMDInventCountingStatus::Completed;
+        rowsArchived = archive.RecId;
+
+        info(strFmt('Rows | seeded %1 | found %2 | archived (Completed) %3 | still New %4 | Error %5',
+                    expectedRows, rowsNew + rowsError + rowsArchived, rowsArchived, rowsNew, rowsError));
+
+        // ── Input that is left: journal groups, group items and counted quantities ──
+        while select CountingDate, WarehouseId, ItemId, Quantity from addOn
+            where addOn.ExecutionId == executionId
+        {
+            groups.add(addOn.CountingDate + '-' + addOn.WarehouseId);
+            groupItems.add(addOn.CountingDate + '-' + addOn.WarehouseId + '|' + addOn.ItemId);
+            inputCounted += addOn.Quantity;
+        }
+
+        while select CountingDate, WarehouseId, ItemId, Quantity, Status from archive
+            where archive.ExecutionId == executionId
+        {
+            key = archive.CountingDate + '-' + archive.WarehouseId + '|' + archive.ItemId;
+            groups.add(archive.CountingDate + '-' + archive.WarehouseId);
+            groupItems.add(key);
+            inputCounted += archive.Quantity;
+
+            if (archive.Status == SJPMDInventCountingStatus::Completed)
+            {
+                // MD12 sums an item's rows of a group into one line.
+                archivedQty.insert(key, (archivedQty.exists(key) ? archivedQty.lookup(key) : 0) + archive.Quantity);
+            }
+        }
+
+        info(strFmt('Input | journal groups %1 of %2 | distinct group items %3 of %4 | total counted %5 of %6',
+                    groups.elements(), expectedGroups, groupItems.elements(), expectedGroupItems, inputCounted, expectedCounted));
+
+        // ── Journals created after the seed for these groups, line by line ──
+        while select JournalId, Description, Posted from journalTable
+            where journalTable.JournalNameId == journalNameId
+               && journalTable.RecId         >  watermark
+        {
+            key = journalTable.Description;
+
+            if (!groups.in(key))
+            {
+                continue;
+            }
+
+            journalsCreated++;
+            journalsPerGroup.insert(key, (journalsPerGroup.exists(key) ? journalsPerGroup.lookup(key) : 0) + 1);
+
+            if (journalTable.Posted)
+            {
+                journalsPosted++;
+            }
+            else if (unpostedListed < #MaxListed)
+            {
+                unposted += journalTable.JournalId + ' ';
+                unpostedListed++;
+            }
+
+            while select ItemId, Counted from journalTrans
+                where journalTrans.JournalId == journalTable.JournalId
+            {
+                journalLines++;
+                lineKey = key + '|' + journalTrans.ItemId;
+                lineKeys.add(lineKey);
+
+                if (!archivedQty.exists(lineKey))
+                {
+                    linesWithoutInput++;
+                    continue;
+                }
+
+                expectedQty = decRound(archivedQty.lookup(lineKey), InventTable::inventDecimals(journalTrans.ItemId));
+
+                if (journalTrans.Counted != expectedQty)
+                {
+                    linesWrongQty++;
+
+                    if (qtyListed < #MaxListed)
+                    {
+                        warning(strFmt('Quantity | %1 | counted on the line %2, archived input %3', lineKey, journalTrans.Counted, expectedQty));
+                        qtyListed++;
+                    }
+                }
+            }
+        }
+
+        me = archivedQty.getEnumerator();
+        while (me.moveNext())
+        {
+            if (!lineKeys.in(me.currentKey()))
+            {
+                inputsWithoutLine++;
+            }
+        }
+
+        se = groups.getEnumerator();
+        while (se.moveNext())
+        {
+            key = se.current();
+
+            if (!journalsPerGroup.exists(key))
+            {
+                groupsWithoutJournal++;
+            }
+            else if (journalsPerGroup.lookup(key) > 1)
+            {
+                groupsWithSeveral++;
+            }
+        }
+
+        info(strFmt('Journals | journal groups %1 | journals created %2 | posted %3 | groups without journal %4 | groups with more than one journal %5',
+                    groups.elements(), journalsCreated, journalsPosted, groupsWithoutJournal, groupsWithSeveral));
+        if (unposted)
+        {
+            warning(strFmt('Created but not posted (first %1): %2', #MaxListed, unposted));
+        }
+        info(strFmt('Lines | journal lines %1 | distinct group items %2 | lines without archived input %3 | lines with another counted quantity %4 | archived inputs without a line %5',
+                    journalLines, groupItems.elements(), linesWithoutInput, linesWrongQty, inputsWithoutLine));
+
+        // ── Error rows ───────────────────────────────────────────────────────
+        errorGroups = TEST_MD12VolumeVerifyJob::reportErrors(executionId);
+
+        // ── Run lock and batch tasks ─────────────────────────────────────────
+        select firstonly RecId, OwnerContext from runLock
+            where runLock.LockScope == #MD12LockScope
+               && runLock.LockKey   == #MD12LockKey;
+        lockLeft = runLock.RecId != 0;
+        info(strFmt('Run lock | %1', lockLeft ? strFmt('a lock row is left (%1)', runLock.OwnerContext) : 'released'));
+
+        workers = TEST_MD12VolumeVerifyJob::reportBatchTasks();
+
+        // ── Verdict ──────────────────────────────────────────────────────────
+        if (expectedRows && rowsNew + rowsError + rowsArchived != expectedRows)
+        {
+            failures += strFmt('%1 of %2 seeded rows found in staging and archive; ', rowsNew + rowsError + rowsArchived, expectedRows);
+        }
+        if (expectedGroups && groups.elements() != expectedGroups)
+        {
+            failures += strFmt('%1 of %2 journal groups found; ', groups.elements(), expectedGroups);
+        }
+        if (expectedGroupItems && groupItems.elements() != expectedGroupItems)
+        {
+            failures += strFmt('%1 of %2 group items found; ', groupItems.elements(), expectedGroupItems);
+        }
+        if (expectedRows && abs(inputCounted - expectedCounted) > 0.01)
+        {
+            failures += strFmt('total counted %1, seeded %2; ', inputCounted, expectedCounted);
+        }
+        if (rowsNew)
+        {
+            failures += strFmt('%1 rows still New; ', rowsNew);
+        }
+        if (rowsError)
+        {
+            failures += strFmt('%1 rows in Error (%2 groups); ', rowsError, errorGroups);
+        }
+        if (groupsWithSeveral)
+        {
+            failures += strFmt('%1 groups with more than one journal; ', groupsWithSeveral);
+        }
+        if (journalsPosted != groups.elements() - errorGroups || journalsPosted != journalsCreated)
+        {
+            failures += strFmt('%1 of %2 groups posted (%3 journals created); ', journalsPosted, groups.elements(), journalsCreated);
+        }
+        if (errorGroups == 0 && journalLines != groupItems.elements())
+        {
+            failures += strFmt('%1 journal lines for %2 distinct items; ', journalLines, groupItems.elements());
+        }
+        if (linesWithoutInput || linesWrongQty || inputsWithoutLine)
+        {
+            failures += strFmt('%1 lines without input, %2 with another counted quantity, %3 inputs without a line; ', linesWithoutInput, linesWrongQty, inputsWithoutLine);
+        }
+        if (conPeek(workers, 1) == 0)
+        {
+            failures += 'no MD12 worker task found; ';
+        }
+        else if (conPeek(workers, 1) > 1 && conPeek(workers, 2) < 2)
+        {
+            failures += strFmt('the %1 worker tasks ran one after the other, not in parallel; ', conPeek(workers, 1));
+        }
+        if (lockLeft)
+        {
+            failures += 'run lock left; ';
+        }
+
+        verdict = failures
+            ? strFmt('FAIL | file %1 | %2', _fileName, failures)
+            : strFmt('PASS | file %1 | %2 rows archived, %3 journals posted, %4 lines with the seeded counted quantities, %5 workers (up to %6 at once), 0 New, 0 Error',
+                     _fileName, rowsArchived, journalsPosted, journalLines, conPeek(workers, 1), conPeek(workers, 2));
+
+        if (failures)
+        {
+            warning(verdict);
+        }
+        else
+        {
+            info(verdict);
+        }
+
+        return verdict;
+    }
+]]></Source>
+			</Method>
+			<Method>
+				<Name>latestExecutionId</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The latest ExecutionId of the file in staging or archive. The seed job's ExecutionIds
+    /// start with the file name and a timestamp, so the highest one is the latest.
+    /// </summary>
+    private static SJPMDInventCountingExecutionId latestExecutionId(SJPMDInventCountingFileName _fileName)
+    {
+        SJPMDInventCountingAddOn   addOn;
+        SJPMDInventCountingArchive archive;
+
+        select firstonly ExecutionId from addOn
+            order by addOn.ExecutionId desc
+            where addOn.FileName == _fileName;
+
+        select firstonly ExecutionId from archive
+            order by archive.ExecutionId desc
+            where archive.FileName == _fileName;
+
+        return addOn.ExecutionId > archive.ExecutionId ? addOn.ExecutionId : archive.ExecutionId;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>manifestValue</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The value after "_<tag>" in the ExecutionId the seed wrote (digits and a decimal point),
+    /// or '' when the tag is missing. J = InventJournalTable RecId before the seed, R = rows,
+    /// G = journal groups, I = distinct group items, Q = total counted quantity.
+    /// </summary>
+    private static str manifestValue(SJPMDInventCountingExecutionId _executionId, str _tag)
+    {
+        int length   = strLen(_executionId);
+        int position = strScan(_executionId, '_' + _tag, length, -length);
+        int endPosition;
+
+        if (!position)
+        {
+            return '';
+        }
+
+        position   += 2;
+        endPosition = position;
+
+        while (endPosition <= length && strFind(subStr(_executionId, endPosition, 1), '0123456789.', 1, 1))
+        {
+            endPosition++;
+        }
+
+        return subStr(_executionId, position, endPosition - position);
+    }
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reportErrors</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Lists the first error messages of the execution, one per journal group, and returns the
+    /// number of journal groups in Error.
+    /// </summary>
+    private static int reportErrors(SJPMDInventCountingExecutionId _executionId)
+    {
+        SJPMDInventCountingAddOn addOn;
+        Set                      errorGroups = new Set(Types::String);
+        str                      key;
+
+        while select CountingDate, WarehouseId, ErrorMessage from addOn
+            where addOn.ExecutionId == _executionId
+               && addOn.Status      == SJPMDInventCountingStatus::Error
+        {
+            key = addOn.CountingDate + '-' + addOn.WarehouseId;
+
+            if (errorGroups.in(key))
+            {
+                continue;
+            }
+
+            errorGroups.add(key);
+
+            if (errorGroups.elements() <= #MaxListed)
+            {
+                warning(strFmt('Error | group %1 | %2', key, subStr(addOn.ErrorMessage, 1, 500)));
+            }
+        }
+
+        return errorGroups.elements();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>reportBatchTasks</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Start, end and duration of every worker and final task of the latest batch job that ran
+    /// MD12 worker tasks, read from the batch history (runtime tasks leave the Batch table when
+    /// the job ends). The time between the first and the last worker ending shows how evenly the
+    /// warehouses were split. Returns [worker tasks, the most of them running at the same time].
+    /// </summary>
+    private static container reportBatchTasks()
+    {
+        BatchHistory history;
+        ClassId      workerClass = className2Id('SJPMDInventCountingBatchTask');
+        ClassId      finalClass  = className2Id('SJPMDInventCountingFinalTask');
+        RecId        batchJobId;
+        int64        seconds;
+        int          workerCount = 0;
+        container    starts;
+        container    ends;
+        int          maxConcurrent;
+
+        select firstonly BatchJobId from history
+            order by history.BatchJobId desc
+            where history.ClassNumber == workerClass;
+        batchJobId = history.BatchJobId;
+
+        if (!batchJobId)
+        {
+            info('Batch | no MD12 worker task found');
+            return [0, false];
+        }
+
+        info(strFmt('Batch | latest MD12 batch job %1', batchJobId));
+
+        while select Caption, Status, StartDateTime, EndDateTime, ClassNumber from history
+            order by history.RecId
+            where history.BatchJobId == batchJobId
+               && (history.ClassNumber == workerClass || history.ClassNumber == finalClass)
+        {
+            seconds = history.StartDateTime && history.EndDateTime
+                ? DateTimeUtil::getDifference(history.EndDateTime, history.StartDateTime)
+                : 0;
+
+            info(strFmt('Task | %1 | %2 | start %3 | end %4 | %5 s',
+                        history.Caption, history.Status, history.StartDateTime, history.EndDateTime, seconds));
+
+            if (history.ClassNumber == workerClass)
+            {
+                workerCount++;
+                starts += [history.StartDateTime];
+                ends   += [history.EndDateTime];
+            }
+        }
+
+        maxConcurrent = TEST_MD31VolumeVerifyJob::maxConcurrent(starts, ends);
+        info(strFmt('Workers | %1 tasks | up to %2 at the same time', workerCount, maxConcurrent));
+
+        return [workerCount, maxConcurrent];
+    }
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

@@ -245,6 +245,32 @@ public final class TEST_MD12SeedDataHelper
         Qty                              _quantity,
         SJPMDInventCountingCompanyCode   _companyCode = curext())
     {
+        SJPMDInventCountingAddOn addOn = TEST_MD12SeedDataHelper::initRow(
+            _fileName, _executionId, _voucherNumber, _countingDate, _warehouseId, _locationId, _itemId, _quantity, _companyCode);
+
+        addOn.insert();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>initRow</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// A filled, unsaved SJPMDInventCountingAddOn staging row, as insertRow writes it.
+    /// For callers that insert many rows at once with a RecordInsertList.
+    /// </summary>
+    public static SJPMDInventCountingAddOn initRow(
+        SJPMDInventCountingFileName      _fileName,
+        SJPMDInventCountingExecutionId   _executionId,
+        SJPMDInventCountingVoucherNumber _voucherNumber,
+        SJPMDInventCountingDate          _countingDate,
+        SJPMDInventCountingWarehouseId   _warehouseId,
+        SJPMDInventCountingLocationId    _locationId,
+        ItemId                           _itemId,
+        Qty                              _quantity,
+        SJPMDInventCountingCompanyCode   _companyCode = curext())
+    {
         SJPMDInventCountingAddOn addOn;
 
         addOn.clear();
@@ -263,7 +289,57 @@ public final class TEST_MD12SeedDataHelper
         addOn.ErrorFlag       = NoYes::No;
         addOn.ErrorMessage    = '';
         addOn.ProcessingGroup = 0;
-        addOn.insert();
+
+        return addOn;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>resolveWarehouses</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Up to _count warehouses on the site configured in SJPMDInventCountingParam, in
+    /// InventLocationId order, with the same filters as resolveWarehouse (IDs longer than
+    /// SJPMDInventCountingWarehouseId are skipped). Returns fewer when the site has fewer;
+    /// throws only when it has none or no site is configured.
+    /// </summary>
+    public static container resolveWarehouses(int _count)
+    {
+        InventLocation           inventLocation;
+        SJPMDInventCountingParam parameters = SJPMDInventCountingParam::find();
+        InventSiteId             siteId     = parameters.InventSiteId;
+        int                      maxLength  = new DictType(extendedTypeNum(SJPMDInventCountingWarehouseId)).stringLen();
+        container                warehouses;
+
+        if (!siteId)
+        {
+            throw error('TEST_MD12: InventSiteId is not configured in SJPMDInventCountingParam.');
+        }
+
+        while select InventLocationId from inventLocation
+            order by InventLocationId
+            where inventLocation.InventSiteId == siteId
+        {
+            if (strLen(inventLocation.InventLocationId) > maxLength)
+            {
+                continue;
+            }
+
+            warehouses += [inventLocation.InventLocationId];
+
+            if (conLen(warehouses) >= _count)
+            {
+                break;
+            }
+        }
+
+        if (!conLen(warehouses))
+        {
+            throw error(strFmt('TEST_MD12: site %1 has no warehouse with an ID of at most %2 characters.', siteId, maxLength));
+        }
+
+        return warehouses;
     }
 
 ]]></Source>

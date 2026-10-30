@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD31VolumeSeedJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD31 volume test - seeding. Inserts _rows SJPMDItemMaster input rows for one file, one per
+/// synthetic SKU ZV31000000001, ZV31000000002, ... (13 characters, the size of sku_cd), in the
+/// current company. Default 1,000 rows (a large daily file); 150,000 for the migration rehearsal.
+///
+/// Seeded inputs only: sku_cd, sku_name_en, sku_name_lc and price, which MD31 writes to the
+/// product number, the English and Japanese product names and the sales price. The names and
+/// prices carry the seed's time, so running the seed again with the same SKUs makes MD31 update
+/// products (archive Status Updated) with values that differ from the previous run's.
+/// All other fields stay blank: MD31 does not require them.
+///
+/// Purges the file's input rows first. The ExecutionId records the run for
+/// TEST_MD31VolumeVerifyJob, independently of what MD31 leaves behind:
+/// file name + _YYYYMMDDHHMMSS + _R<rows> + _P<total price>.
+///
+/// The SKUs become real products in the current company and are not deleted afterwards.
+/// </summary>
+public final class TEST_MD31VolumeSeedJob
+{
+    #define.FileName('TEST_MD31_VOL01')
+    #define.Rows(1000)
+    #define.SkuPrefix('ZV31')
+    #define.CompanyCode('VOL')
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        info(TEST_MD31VolumeSeedJob::seed());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seed</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Seeds _rows SKUs into _fileName and returns a one-line summary with the expected outcome.
+    /// </summary>
+    public static str seed(int _rows = #Rows, Filename _fileName = #FileName)
+    {
+        int              secs        = timeNow();
+        str              runStamp    = strFmt('%1%2%3',
+                                              strRFix(int2Str(secs div 3600), 2, '0'),
+                                              strRFix(int2Str((secs mod 3600) div 60), 2, '0'),
+                                              strRFix(int2Str(secs mod 60), 2, '0'));
+        real             runCents    = (secs mod 100) / 100;
+        RecordInsertList insertList  = new RecordInsertList(tableNum(SJPMDItemMaster));
+        SJPMDItemMaster  itemMaster;
+        SJPMDItemMaster  itemMasterDelete;
+        SJPMDInventCountingExecutionId executionId;
+        real             totalPrice  = 0;
+        int64            purged;
+        int              i;
+
+        if (_rows <= 0 || _rows > 999999999 || !_fileName)
+        {
+            throw error('TEST_MD31: rows must be between 1 and 999,999,999, and a file name is required.');
+        }
+
+        for (i = 1; i <= _rows; i++)
+        {
+            totalPrice += TEST_MD31VolumeSeedJob::price(i, runCents);
+        }
+
+        executionId = strFmt('%1_%2%3_R%4_P%5',
+                             _fileName,
+                             TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet()),
+                             runStamp,
+                             _rows,
+                             num2Str(totalPrice, 0, 2, 1, 0));
+
+        ttsbegin;
+        select count(RecId) from itemMasterDelete
+            where itemMasterDelete.file_name == _fileName;
+        purged = itemMasterDelete.RecId;
+
+        delete_from itemMasterDelete
+            where itemMasterDelete.file_name == _fileName;
+
+        for (i = 1; i <= _rows; i++)
+        {
+            itemMaster.clear();
+            itemMaster.crp_cd          = #CompanyCode;
+            itemMaster.sku_cd          = TEST_MD31VolumeSeedJob::sku(i);
+            itemMaster.sku_name_en     = strFmt('MD31 volume %1 %2', itemMaster.sku_cd, runStamp);
+            itemMaster.sku_name_lc     = strFmt('MD31ボリューム %1 %2', itemMaster.sku_cd, runStamp);
+            itemMaster.price           = TEST_MD31VolumeSeedJob::price(i, runCents);
+            itemMaster.file_name       = _fileName;
+            itemMaster.ExecutionId     = executionId;
+            itemMaster.Status          = SJPMDInventImportStatus::New;
+            itemMaster.ErrorFlag       = NoYes::No;
+            itemMaster.ProcessingGroup = 0;
+            insertList.add(itemMaster);
+        }
+
+        insertList.insertDatabase();
+        ttscommit;
+
+        return strFmt('VOL31 | file %1 | execution %2 | %3 SKUs %4 to %5 | run MD31 with FileName = %1 | expect %3 rows archived (Created on the first run, Updated after), 0 New, 0 Error | purged %6',
+                      _fileName, executionId, _rows, TEST_MD31VolumeSeedJob::sku(1), TEST_MD31VolumeSeedJob::sku(_rows), purged);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seedRows</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Seeds _rows SKUs (as text, for the automation step) into the default file.
+    /// </summary>
+    public static str seedRows(str _rows)
+    {
+        return TEST_MD31VolumeSeedJob::seed(str2Int(_rows));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>sku</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The synthetic SKU number _index: ZV31 + 9 digits.
+    /// </summary>
+    public static SJPMDItemMasterJANCode sku(int _index)
+    {
+        return #SkuPrefix + strRFix(int2Str(_index), 9, '0');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>price</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The sales price of SKU number _index: 100 to 998, plus the run's cents, so a new run
+    /// changes every price.
+    /// </summary>
+    private static real price(int _index, real _runCents)
+    {
+        return 100 + (_index mod 899) + _runCents;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

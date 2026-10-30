@@ -1,0 +1,954 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12RetryTest</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 inventory counting - retry and per-journal-group isolation of parallel runs:
+/// SJPMDInventCountingBatchService.processJournalGroupSafe, the one transaction of create,
+/// post and archive in processJournalGroup (a failed attempt leaves nothing posted, so a retry
+/// runs the whole journal group again) and the keyset loop in processGroup.
+///
+/// Faults are injected with TEST_MD12FaultInjectingBatchService, which replaces the validate,
+/// create, post and archive steps, so these tests check the handling around a journal group,
+/// not the journal logic (TEST_MD12RegressionTest covers that); TC31 uses the real create and
+/// post steps in company DMG to show the rollback of a real posting. A collision between real
+/// worker tasks cannot be produced in a unit test.
+///
+/// Runs with TestTransactionMode::None: the code under test must run at tts level 0, because
+/// X++ skips catch blocks inside a transaction and allows retry only outside one. Nothing is
+/// rolled back, so the class writes only SJPMDInventCountingAddOn rows of its own files
+/// (TEST_MD12_RTnn) - the double creates and posts no journal, except in TC31, where the
+/// posting is rolled back - and deletes them in setUp and tearDown (TC31 also in DMG).
+/// </summary>
+[SysTestTarget(classStr(SJPMDInventCountingBatchService), UtilElementType::Class)]
+[SysTestTransaction(TestTransactionMode::None)]
+public final class TEST_MD12RetryTest extends SysTestCase
+{
+    guid suiteLockToken;
+    #OCCRetryCount
+    // Seeded rows stay in processing group 0 until the orchestrator assigns them.
+    #define.UnassignedGroup(0)
+    // Input files of this class; setUp and tearDown delete their rows.
+    #define.OwnFiles('TEST_MD12_RT*')
+    // TEST_SuiteLock scope: one run of this class at a time across sessions.
+    #define.SuiteLockScope('TEST.MD12RetryTest')
+    #define.CountingDate('20260101')
+    // Company with real master data for TC31 (the other tests run in the empty test company).
+    #define.RealCompany('DMG')
+    // Must match the macros in SJPMDInventCountingService.
+    #define.MD12LockScope('MD12.InventCounting')
+    #define.MD12LockKey('Process')
+
+    int voucherCounter;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setUpTestCase</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The class commits its rows and shares file names between runs, so only one run may go at
+    /// a time; a second run fails here with the owner of the first.
+    /// </summary>
+    public void setUpTestCase()
+    {
+        super();
+
+        suiteLockToken = TEST_SuiteLock::acquire(#SuiteLockScope);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tearDownTestCase</Name>
+				<Source><![CDATA[
+    public void tearDownTestCase()
+    {
+        TEST_SuiteLock::release(#SuiteLockScope, suiteLockToken);
+
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setUp</Name>
+				<Source><![CDATA[
+    public void setUp()
+    {
+        super();
+
+        voucherCounter = 0;
+
+        // Rows left by an earlier run that stopped before tearDown.
+        this.deleteOwnRows();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tearDown</Name>
+				<Source><![CDATA[
+    public void tearDown()
+    {
+        this.deleteOwnRows();
+
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc21_deadlockOnceInCreate_isRetried</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC21: creating the journal is a deadlock victim once. The transaction was rolled back,
+    /// so the retry creates the journal again, posts it once and archives the group.
+    /// </summary>
+    [SysTestMethod]
+    public void tc21_deadlockOnceInCreate_isRetried()
+    {
+        const SJPMDInventCountingFileName    TestFile  = 'TEST_MD12_RT21';
+        const SJPMDInventCountingWarehouseId Warehouse = 'R21A';
+        TEST_MD12FaultInjectingBatchService service = TEST_MD12FaultInjectingBatchService::construct()
+            .addFault(Warehouse, TEST_MD12FaultInjectingBatchService::StepCreate, Exception::Deadlock, 1);
+
+        this.seedGroup(TestFile, Warehouse, #CountingDate, 2);
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertSteps(service, Warehouse, 2, 1, 1);
+        this.assertEquals(0, this.rowsOf(TestFile), 'The retried group is archived; no row is left');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc22_deadlockOnceInArchive_wholeGroupRetried</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC22: the journal is created and posted, then the archive step deadlocks once. Create,
+    /// post and archive are one transaction, so the deadlock rolled back the journal and its
+    /// posting too, and the retry runs the whole journal group again: two creations, two
+    /// postings, two archive attempts - of which only the second attempt commits.
+    /// </summary>
+    [SysTestMethod]
+    public void tc22_deadlockOnceInArchive_wholeGroupRetried()
+    {
+        const SJPMDInventCountingFileName    TestFile  = 'TEST_MD12_RT22';
+        const SJPMDInventCountingWarehouseId Warehouse = 'R22A';
+        TEST_MD12FaultInjectingBatchService service = TEST_MD12FaultInjectingBatchService::construct()
+            .addFault(Warehouse, TEST_MD12FaultInjectingBatchService::StepArchive, Exception::Deadlock, 1);
+
+        this.seedGroup(TestFile, Warehouse, #CountingDate, 2);
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertSteps(service, Warehouse, 2, 2, 2);
+        this.assertEquals(0, this.rowsOf(TestFile), 'The retried group is archived; no row is left');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc23_updateConflictOnceInPost_wholeGroupRetried</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC23: posting hits an update conflict once (JournalCheckPost gave up on it). The journal
+    /// was rolled back with the transaction, so the retry creates and posts it again.
+    /// </summary>
+    [SysTestMethod]
+    public void tc23_updateConflictOnceInPost_wholeGroupRetried()
+    {
+        const SJPMDInventCountingFileName    TestFile  = 'TEST_MD12_RT23';
+        const SJPMDInventCountingWarehouseId Warehouse = 'R23A';
+        TEST_MD12FaultInjectingBatchService service = TEST_MD12FaultInjectingBatchService::construct()
+            .addFault(Warehouse, TEST_MD12FaultInjectingBatchService::StepPost, Exception::UpdateConflict, 1);
+
+        this.seedGroup(TestFile, Warehouse, #CountingDate, 1);
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertSteps(service, Warehouse, 2, 2, 1);
+        this.assertEquals(0, this.rowsOf(TestFile), 'The retried group is archived; no row is left');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc24_postReturnsButJournalNotPosted_groupInErrorNotArchived</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC24: posting returns without an exception but the journal is not posted. The group must
+    /// not be archived as done: it ends in Error with the not-posted message (nothing archived,
+    /// the journal rolled back), and the next group is completed.
+    /// </summary>
+    [SysTestMethod]
+    public void tc24_postReturnsButJournalNotPosted_groupInErrorNotArchived()
+    {
+        const SJPMDInventCountingFileName    TestFile      = 'TEST_MD12_RT24';
+        const SJPMDInventCountingWarehouseId BadWarehouse  = 'R24A';
+        const SJPMDInventCountingWarehouseId GoodWarehouse = 'R24B';
+        TEST_MD12FaultInjectingBatchService service = TEST_MD12FaultInjectingBatchService::construct()
+            .postWithoutPosting(BadWarehouse);
+        str message;
+
+        this.seedGroup(TestFile, BadWarehouse, #CountingDate, 2);
+        this.seedGroup(TestFile, GoodWarehouse, #CountingDate, 1);
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertSteps(service, BadWarehouse, 1, 1, 0);
+        this.assertSteps(service, GoodWarehouse, 1, 1, 1);
+        this.assertOnlyGroupInError(TestFile, BadWarehouse, 2,
+            strFmt("@SJP:MDInventCounting_JournalPostFailed", TestFile, #CountingDate, BadWarehouse, ''));
+
+        message = this.errorMessageOf(TestFile, BadWarehouse);
+        this.assertTrue(this.contains(message, strFmt("@SJP:MDInventCounting_JournalNotPostedAfterPost", 'TESTJ1')),
+            strFmt('The message says the journal was not posted. ErrorMessage: %1', message));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc25_deadlockEveryTimeInArchive_groupInErrorNextGroupCompleted</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC25: the archive step deadlocks on every attempt. Each attempt rolls back its journal
+    /// and posting, so after #RetryNum retries the group ends in Error with nothing posted (the
+    /// message says so), and the loop continues: the next group is completed. Before the fix,
+    /// the deadlock ended the whole processing group and left every later group New.
+    /// </summary>
+    [SysTestMethod]
+    public void tc25_deadlockEveryTimeInArchive_groupInErrorNextGroupCompleted()
+    {
+        const SJPMDInventCountingFileName    TestFile      = 'TEST_MD12_RT25';
+        const SJPMDInventCountingWarehouseId BadWarehouse  = 'R25A';
+        const SJPMDInventCountingWarehouseId GoodWarehouse = 'R25B';
+        TEST_MD12FaultInjectingBatchService service = TEST_MD12FaultInjectingBatchService::construct()
+            .addFault(BadWarehouse, TEST_MD12FaultInjectingBatchService::StepArchive, Exception::Deadlock, maxInt());
+
+        this.seedGroup(TestFile, BadWarehouse, #CountingDate, 2);
+        this.seedGroup(TestFile, GoodWarehouse, #CountingDate, 1);
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertSteps(service, BadWarehouse, #RetryNum + 1, #RetryNum + 1, #RetryNum + 1);
+        this.assertSteps(service, GoodWarehouse, 1, 1, 1);
+        this.assertOnlyGroupInError(TestFile, BadWarehouse, 2,
+            strFmt("@SJP:MDInventCounting_DeadlockRetryExceeded", TestFile, #CountingDate, BadWarehouse, ''));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc26_duplicateKeyEveryTimeInCreate_groupInErrorNextGroupCompleted</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC26: creating the journal hits a duplicate key on every attempt. After #RetryNum
+    /// retries the group ends in Error without any posting, and the next group is completed.
+    /// </summary>
+    [SysTestMethod]
+    public void tc26_duplicateKeyEveryTimeInCreate_groupInErrorNextGroupCompleted()
+    {
+        const SJPMDInventCountingFileName    TestFile      = 'TEST_MD12_RT26';
+        const SJPMDInventCountingWarehouseId BadWarehouse  = 'R26A';
+        const SJPMDInventCountingWarehouseId GoodWarehouse = 'R26B';
+        TEST_MD12FaultInjectingBatchService service = TEST_MD12FaultInjectingBatchService::construct()
+            .addFault(BadWarehouse, TEST_MD12FaultInjectingBatchService::StepCreate, Exception::DuplicateKeyException, maxInt());
+
+        this.seedGroup(TestFile, BadWarehouse, #CountingDate, 1);
+        this.seedGroup(TestFile, GoodWarehouse, #CountingDate, 1);
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertSteps(service, BadWarehouse, #RetryNum + 1, 0, 0);
+        this.assertSteps(service, GoodWarehouse, 1, 1, 1);
+        this.assertOnlyGroupInError(TestFile, BadWarehouse, 1,
+            strFmt("@SJP:MDInventCounting_DuplicateKeyRetryExceeded", TestFile, #CountingDate, BadWarehouse, ''));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc27_clrErrorInPost_notRetriedGroupInErrorNextGroupCompleted</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC27: posting fails with an exception that is not a collision (here CLRError). It is not
+    /// retried; the group ends in Error with the unexpected-error message, which says nothing was
+    /// posted, and the next group is completed.
+    /// </summary>
+    [SysTestMethod]
+    public void tc27_clrErrorInPost_notRetriedGroupInErrorNextGroupCompleted()
+    {
+        const SJPMDInventCountingFileName    TestFile      = 'TEST_MD12_RT27';
+        const SJPMDInventCountingWarehouseId BadWarehouse  = 'R27A';
+        const SJPMDInventCountingWarehouseId GoodWarehouse = 'R27B';
+        TEST_MD12FaultInjectingBatchService service = TEST_MD12FaultInjectingBatchService::construct()
+            .addFault(BadWarehouse, TEST_MD12FaultInjectingBatchService::StepPost, Exception::CLRError, maxInt());
+
+        this.seedGroup(TestFile, BadWarehouse, #CountingDate, 1);
+        this.seedGroup(TestFile, GoodWarehouse, #CountingDate, 1);
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertSteps(service, BadWarehouse, 1, 1, 0);
+        this.assertSteps(service, GoodWarehouse, 1, 1, 1);
+        this.assertOnlyGroupInError(TestFile, BadWarehouse, 1,
+            strFmt("@SJP:MDInventCounting_UnexpectedError", TestFile, #CountingDate, BadWarehouse, ''));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc28_errorMessage_holdsOnlyOwnInfolog</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC28: the first group succeeds but writes an infolog message; the second fails creating
+    /// its journal with its own message. The second group's ErrorMessage holds only what was
+    /// logged during its own attempt. Before the fix, collectInfologErrors took the whole
+    /// infolog, so the first group's message ended up in the second group's ErrorMessage.
+    /// </summary>
+    [SysTestMethod]
+    public void tc28_errorMessage_holdsOnlyOwnInfolog()
+    {
+        const SJPMDInventCountingFileName    TestFile         = 'TEST_MD12_RT28';
+        const SJPMDInventCountingWarehouseId QuietWarehouse   = 'R28A';
+        const SJPMDInventCountingWarehouseId FailingWarehouse = 'R28B';
+        const str                            QuietNote        = 'TC28 note of the first group';
+        const str                            FaultNote        = 'TC28 fault of the second group';
+        TEST_MD12FaultInjectingBatchService service = TEST_MD12FaultInjectingBatchService::construct()
+            .addFault(QuietWarehouse, TEST_MD12FaultInjectingBatchService::StepCreate, Exception::Error, 0, QuietNote)
+            .addFault(FailingWarehouse, TEST_MD12FaultInjectingBatchService::StepCreate, Exception::Error, 1, FaultNote);
+        str message;
+
+        this.seedGroup(TestFile, QuietWarehouse, #CountingDate, 1);
+        this.seedGroup(TestFile, FailingWarehouse, #CountingDate, 1);
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertOnlyGroupInError(TestFile, FailingWarehouse, 1,
+            strFmt("@SJP:MDInventCounting_JournalCreateFailed", TestFile, #CountingDate, FailingWarehouse, ''));
+
+        message = this.errorMessageOf(TestFile, FailingWarehouse);
+        this.assertTrue(this.contains(message, FaultNote), strFmt('The group\'s own message is kept. ErrorMessage: %1', message));
+        this.assertFalse(this.contains(message, QuietNote), strFmt('The first group\'s message must not leak in. ErrorMessage: %1', message));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc29_groupLeftNew_loopEndsAndRowsArePending</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC29: a journal group stays New after its attempt (for example marking it Error failed
+    /// too). The keyset loop visits it once, does not loop on it, processes the next group, and
+    /// countPendingRows reports its rows - which makes SJPMDInventCountingBatchTask fail the
+    /// processing group.
+    /// </summary>
+    [SysTestMethod]
+    public void tc29_groupLeftNew_loopEndsAndRowsArePending()
+    {
+        const SJPMDInventCountingFileName    TestFile       = 'TEST_MD12_RT29';
+        const SJPMDInventCountingWarehouseId StuckWarehouse = 'R29A';
+        const SJPMDInventCountingWarehouseId NextWarehouse  = 'R29B';
+        TEST_MD12FaultInjectingBatchService service = TEST_MD12FaultInjectingBatchService::construct()
+            .leaveNew(StuckWarehouse);
+
+        this.seedGroup(TestFile, StuckWarehouse, #CountingDate, 2);
+        this.seedGroup(TestFile, NextWarehouse, #CountingDate, 1);
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertSteps(service, StuckWarehouse, 1, 1, 1);
+        this.assertSteps(service, NextWarehouse, 1, 1, 1);
+        this.assertEquals(2, int642int(service.countPendingRows(#UnassignedGroup, TestFile)), 'The group left New is reported as pending');
+        this.assertEquals(2, this.rowsWithStatus(TestFile, StuckWarehouse, SJPMDInventCountingStatus::New), 'Only the group left New remains');
+        this.assertEquals(2, this.rowsOf(TestFile), 'No other row is left');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc30_order_warehouseThenCountingDate</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC30: processGroup takes the journal groups warehouse by warehouse and, within a
+    /// warehouse, in counting-date order, whatever order the rows were loaded in: a later count
+    /// reads on-hand only after the earlier count of that warehouse is posted. A blank
+    /// warehouse sorts first and is not skipped by the keyset loop.
+    /// </summary>
+    [SysTestMethod]
+    public void tc30_order_warehouseThenCountingDate()
+    {
+        const SJPMDInventCountingFileName TestFile = 'TEST_MD12_RT30';
+        TEST_MD12FaultInjectingBatchService service = TEST_MD12FaultInjectingBatchService::construct();
+        List expected = new List(Types::String);
+
+        this.seedGroup(TestFile, 'R30B', '20260102', 1);
+        this.seedGroup(TestFile, 'R30A', '20260103', 1);
+        this.seedGroup(TestFile, 'R30A', '20260101', 1);
+        this.seedGroup(TestFile, '',     '20260105', 1);
+        this.seedGroup(TestFile, 'R30B', '20260101', 1);
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        expected.addEnd('|20260105');
+        expected.addEnd('R30A|20260101');
+        expected.addEnd('R30A|20260103');
+        expected.addEnd('R30B|20260101');
+        expected.addEnd('R30B|20260102');
+
+        this.assertEquals(expected.toString(), service.createOrder().toString(), 'Journal groups in warehouse, then counting-date order');
+        this.assertEquals(0, this.rowsOf(TestFile), 'Every group is archived');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seedGroup</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// _rows New staging rows of one journal group (file, counting date, warehouse), each with
+    /// its own voucher. The item and location are made up: the double skips validation.
+    /// </summary>
+    private void seedGroup(SJPMDInventCountingFileName    _fileName,
+                           SJPMDInventCountingWarehouseId _warehouseId,
+                           SJPMDInventCountingDate        _countingDate,
+                           int                            _rows)
+    {
+        int i;
+
+        ttsbegin;
+        for (i = 1; i <= _rows; i++)
+        {
+            voucherCounter++;
+
+            TEST_MD12SeedDataHelper::insertRow(
+                _fileName,
+                _fileName,
+                'RT' + strRFix(int2Str(voucherCounter), 4, '0'),
+                _countingDate,
+                _warehouseId,
+                'RTLOC',
+                'RTITEM',
+                1);
+        }
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc31_archiveFailsAfterRealPosting_postingRolledBack</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC31: with the real validate, create and post steps in company DMG, the journal is
+    /// created and really posted, then archiving fails with an error. Create, post and archive
+    /// are one transaction, so the journal and its posting are rolled back: afterwards no
+    /// journal of the group exists, and the row is in Error with the archive message, which
+    /// says nothing was posted. Before option A, this left a posted journal whose rows a rerun
+    /// would post again.
+    /// </summary>
+    [SysTestMethod]
+    public void tc31_archiveFailsAfterRealPosting_postingRolledBack()
+    {
+        const SJPMDInventCountingFileName   TestFile = 'TEST_MD12_RT31';
+        SJPMDInventCountingWarehouseId      warehouseId;
+        SJPMDInventCountingDate             countingDate;
+        ItemId                              itemId;
+        InventJournalTable                  journalTable;
+        RecId                               watermark;
+        TEST_MD12FaultInjectingBatchService service;
+
+        changecompany (#RealCompany)
+        {
+            try
+            {
+                this.deleteOwnRows();
+
+                warehouseId  = TEST_MD12SeedDataHelper::resolveWarehouse(1);
+                countingDate = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
+                itemId       = conPeek(TEST_MD12SeedDataHelper::resolveItems(warehouseId, 1), 1);
+
+                select maxof(RecId) from journalTable
+                    where journalTable.RecId > 0;
+                watermark = journalTable.RecId;
+
+                ttsbegin;
+                TEST_MD12SeedDataHelper::insertRow(
+                    TestFile,
+                    TestFile,
+                    'RT31V001',
+                    countingDate,
+                    warehouseId,
+                    TEST_MD12SeedDataHelper::resolveLocation(warehouseId),
+                    itemId,
+                    TEST_MD12SeedDataHelper::onHandQty(itemId, warehouseId) + 3);
+                ttscommit;
+
+                service = TEST_MD12FaultInjectingBatchService::construct()
+                    .useRealJournal()
+                    .addFault(warehouseId, TEST_MD12FaultInjectingBatchService::StepArchive, Exception::Error, maxInt(), 'TC31 archive fault');
+
+                service.processGroup(#UnassignedGroup, TestFile);
+
+                this.assertSteps(service, warehouseId, 1, 1, 1);
+
+                select count(RecId) from journalTable
+                    where journalTable.RecId       > watermark
+                       && journalTable.Description == countingDate + '-' + warehouseId;
+                this.assertEquals(0, int642int(journalTable.RecId), 'The journal and its posting were rolled back with the failed archive');
+
+                this.assertOnlyGroupInError(TestFile, warehouseId, 1,
+                    strFmt("@SJP:MDInventCounting_ArchiveFailed", TestFile, countingDate, warehouseId, ''));
+            }
+            finally
+            {
+                this.deleteOwnRows();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc32_deadlockAfterRealPosting_retryPostsOnce</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC32: with the real validate, create and post steps in company DMG, the archive step
+    /// deadlocks once after the journal was really posted. The deadlock rolls back that journal
+    /// and its posting; the retry creates and posts a new journal and archives the group. In the
+    /// end exactly one journal of the group exists, posted, and the row is archived - the retry
+    /// did not post the count twice. Leaves one posted journal in DMG.
+    /// </summary>
+    [SysTestMethod]
+    public void tc32_deadlockAfterRealPosting_retryPostsOnce()
+    {
+        const SJPMDInventCountingFileName   TestFile = 'TEST_MD12_RT32';
+        SJPMDInventCountingWarehouseId      warehouseId;
+        SJPMDInventCountingDate             countingDate;
+        ItemId                              itemId;
+        InventJournalTable                  journalTable;
+        SJPMDInventCountingArchive          archive;
+        RecId                               watermark;
+        int                                 journals;
+        int                                 postedJournals;
+        TEST_MD12FaultInjectingBatchService service;
+
+        changecompany (#RealCompany)
+        {
+            try
+            {
+                this.deleteOwnRows();
+
+                warehouseId  = TEST_MD12SeedDataHelper::resolveWarehouse(1);
+                countingDate = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
+                itemId       = conPeek(TEST_MD12SeedDataHelper::resolveItems(warehouseId, 1), 1);
+
+                select maxof(RecId) from journalTable
+                    where journalTable.RecId > 0;
+                watermark = journalTable.RecId;
+
+                ttsbegin;
+                TEST_MD12SeedDataHelper::insertRow(
+                    TestFile,
+                    TestFile,
+                    'RT32V001',
+                    countingDate,
+                    warehouseId,
+                    TEST_MD12SeedDataHelper::resolveLocation(warehouseId),
+                    itemId,
+                    TEST_MD12SeedDataHelper::onHandQty(itemId, warehouseId) + 1);
+                ttscommit;
+
+                service = TEST_MD12FaultInjectingBatchService::construct()
+                    .useRealJournal()
+                    .addFault(warehouseId, TEST_MD12FaultInjectingBatchService::StepArchive, Exception::Deadlock, 1);
+
+                service.processGroup(#UnassignedGroup, TestFile);
+
+                this.assertSteps(service, warehouseId, 2, 2, 2);
+
+                while select Posted from journalTable
+                    where journalTable.RecId       > watermark
+                       && journalTable.Description == countingDate + '-' + warehouseId
+                {
+                    journals++;
+                    if (journalTable.Posted)
+                    {
+                        postedJournals++;
+                    }
+                }
+                this.assertEquals(1, journals, 'Exactly one journal of the group exists after the retry');
+                this.assertEquals(1, postedJournals, 'That journal is posted');
+
+                this.assertEquals(0, this.rowsOf(TestFile), 'No staging row is left');
+                select count(RecId) from archive
+                    where archive.FileName == TestFile
+                       && archive.Status   == SJPMDInventCountingStatus::Completed;
+                this.assertEquals(1, int642int(archive.RecId), 'The row is archived once');
+            }
+            finally
+            {
+                this.deleteOwnRows();
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc33_earlierCountFails_laterCountOfWarehouseDeferred</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC33: warehouse R33A has counts on two dates, and creating the first date's journal
+    /// fails. The second date must not be posted (a count posted later for the first date would
+    /// add to it): it ends in Error with the earlier-count message naming the first date, and
+    /// its journal is never created. Warehouse R33B is not affected.
+    /// </summary>
+    [SysTestMethod]
+    public void tc33_earlierCountFails_laterCountOfWarehouseDeferred()
+    {
+        const SJPMDInventCountingFileName    TestFile      = 'TEST_MD12_RT33';
+        const SJPMDInventCountingWarehouseId BadWarehouse  = 'R33A';
+        const SJPMDInventCountingWarehouseId GoodWarehouse = 'R33B';
+        const SJPMDInventCountingDate        FirstDate     = '20260101';
+        const SJPMDInventCountingDate        SecondDate    = '20260102';
+        TEST_MD12FaultInjectingBatchService service = TEST_MD12FaultInjectingBatchService::construct()
+            .addFault(BadWarehouse, TEST_MD12FaultInjectingBatchService::StepCreate, Exception::Error, maxInt(), 'TC33 create fault');
+        str expected;
+
+        this.seedGroup(TestFile, BadWarehouse, FirstDate, 1);
+        this.seedGroup(TestFile, BadWarehouse, SecondDate, 2);
+        this.seedGroup(TestFile, GoodWarehouse, FirstDate, 1);
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertSteps(service, BadWarehouse, 1, 0, 0);
+        this.assertSteps(service, GoodWarehouse, 1, 1, 1);
+
+        expected = strRTrim(strFmt("@SJP:MDInventCounting_JournalCreateFailed", TestFile, FirstDate, BadWarehouse, ''));
+        this.assertMessageOnDate(TestFile, BadWarehouse, FirstDate, 1, expected);
+
+        expected = strFmt("@SJP:MDInventCounting_EarlierCountUnresolved", TestFile, SecondDate, BadWarehouse, FirstDate);
+        this.assertMessageOnDate(TestFile, BadWarehouse, SecondDate, 2, expected);
+
+        this.assertEquals(3, this.rowsOf(TestFile), 'Only the two groups of R33A are left');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc34_earlierErrorRowOfOtherFile_laterCountDeferred</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC34: an earlier count of warehouse R34A from another file is still in Error. A later
+    /// count of R34A is deferred - Error with the earlier-count message - without creating a
+    /// journal; the other file's row is left as it was.
+    /// </summary>
+    [SysTestMethod]
+    public void tc34_earlierErrorRowOfOtherFile_laterCountDeferred()
+    {
+        const SJPMDInventCountingFileName    TestFile    = 'TEST_MD12_RT34';
+        const SJPMDInventCountingFileName    EarlierFile = 'TEST_MD12_RT34E';
+        const SJPMDInventCountingWarehouseId Warehouse   = 'R34A';
+        TEST_MD12FaultInjectingBatchService service = TEST_MD12FaultInjectingBatchService::construct();
+        SJPMDInventCountingAddOn addOn;
+
+        this.seedGroup(EarlierFile, Warehouse, '20260101', 1);
+        ttsbegin;
+        update_recordset addOn
+            setting Status = SJPMDInventCountingStatus::Error, ErrorFlag = NoYes::Yes, ErrorMessage = 'TC34 earlier error'
+            where addOn.FileName == EarlierFile;
+        ttscommit;
+
+        this.seedGroup(TestFile, Warehouse, '20260105', 1);
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertSteps(service, Warehouse, 0, 0, 0);
+        this.assertMessageOnDate(TestFile, Warehouse, '20260105', 1,
+            strFmt("@SJP:MDInventCounting_EarlierCountUnresolved", TestFile, '20260105', Warehouse, '20260101'));
+        this.assertEquals(1, this.rowsWithStatus(EarlierFile, Warehouse, SJPMDInventCountingStatus::Error), 'The earlier row is unchanged');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc35_connectionLostOnce_isRetried</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC35: the database connection drops once while the journal is created. The rows are
+    /// valid, so the attempt is retried (not marked Error) and the group is archived.
+    /// </summary>
+    [SysTestMethod]
+    public void tc35_connectionLostOnce_isRetried()
+    {
+        const SJPMDInventCountingFileName    TestFile  = 'TEST_MD12_RT35';
+        const SJPMDInventCountingWarehouseId Warehouse = 'R35A';
+        TEST_MD12FaultInjectingBatchService service = TEST_MD12FaultInjectingBatchService::construct()
+            .addFault(Warehouse, TEST_MD12FaultInjectingBatchService::StepCreate, Exception::TransientSqlConnectionError, 1);
+
+        this.seedGroup(TestFile, Warehouse, #CountingDate, 2);
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertSteps(service, Warehouse, 2, 1, 1);
+        this.assertEquals(0, this.rowsOf(TestFile), 'The retried group is archived; no row is left');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc36_connectionLostEveryTime_groupStopsRowsStayNew</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC36: the database connection stays lost. After #RetryNum retries processGroup stops
+    /// with the connection error: the rows stay New (not Error, which a later run would skip),
+    /// the next journal group is not started, and countPendingRows reports all of them, so
+    /// SJPMDInventCountingBatchTask fails and the next run processes them.
+    /// </summary>
+    [SysTestMethod]
+    public void tc36_connectionLostEveryTime_groupStopsRowsStayNew()
+    {
+        const SJPMDInventCountingFileName    TestFile      = 'TEST_MD12_RT36';
+        const SJPMDInventCountingWarehouseId LostWarehouse = 'R36A';
+        const SJPMDInventCountingWarehouseId NextWarehouse = 'R36B';
+        TEST_MD12FaultInjectingBatchService service = TEST_MD12FaultInjectingBatchService::construct()
+            .addFault(LostWarehouse, TEST_MD12FaultInjectingBatchService::StepCreate, Exception::TransientSqlConnectionError, maxInt());
+        boolean stopped;
+
+        this.seedGroup(TestFile, LostWarehouse, #CountingDate, 2);
+        this.seedGroup(TestFile, NextWarehouse, #CountingDate, 1);
+
+        try
+        {
+            service.processGroup(#UnassignedGroup, TestFile);
+        }
+        catch (Exception::TransientSqlConnectionError)
+        {
+            stopped = true;
+        }
+
+        this.assertTrue(stopped, 'processGroup stops with the connection error');
+        this.assertSteps(service, LostWarehouse, #RetryNum + 1, 0, 0);
+        this.assertSteps(service, NextWarehouse, 0, 0, 0);
+        this.assertEquals(2, this.rowsWithStatus(TestFile, LostWarehouse, SJPMDInventCountingStatus::New), 'The lost group stays New');
+        this.assertEquals(1, this.rowsWithStatus(TestFile, NextWarehouse, SJPMDInventCountingStatus::New), 'The next group stays New');
+        this.assertEquals(3, int642int(service.countPendingRows(#UnassignedGroup, TestFile)), 'All rows are reported as pending');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc37_countFailsAfterLock_lockReleased</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC37: the orchestrator takes the MD12 run lock, then its first query (countNewRows)
+    /// fails. The lock must be released, or no later run could start. Uses the real MD12 lock
+    /// scope, so it fails when an MD12 run is going on.
+    /// </summary>
+    [SysTestMethod]
+    public void tc37_countFailsAfterLock_lockReleased()
+    {
+        TEST_MD12GroupAssigningService service  = TEST_MD12GroupAssigningService::construct();
+        SJPMDInventCountingContract    contract = new SJPMDInventCountingContract();
+        boolean                        failed;
+
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#MD12LockScope, #MD12LockKey), 'Precondition: no MD12 run holds the lock');
+
+        contract.parmNumOfThreads(1);
+        contract.parmFileName('TEST_MD12_RT37');
+        service.failCountNewRows();
+
+        try
+        {
+            service.orchestrate(contract);
+        }
+        catch (Exception::Error)
+        {
+            failed = true;
+        }
+
+        this.assertTrue(failed, 'orchestrate fails');
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#MD12LockScope, #MD12LockKey), 'The run lock is released');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertMessageOnDate</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The _rows rows of the journal group (file, warehouse, counting date) are in Error, and
+    /// their message starts with _expectedPrefix.
+    /// </summary>
+    private void assertMessageOnDate(SJPMDInventCountingFileName    _fileName,
+                                     SJPMDInventCountingWarehouseId _warehouseId,
+                                     SJPMDInventCountingDate        _countingDate,
+                                     int                            _rows,
+                                     str                            _expectedPrefix)
+    {
+        SJPMDInventCountingAddOn addOn;
+
+        select count(RecId) from addOn
+            where addOn.FileName     == _fileName
+               && addOn.WarehouseId  == _warehouseId
+               && addOn.CountingDate == _countingDate
+               && addOn.Status       == SJPMDInventCountingStatus::Error;
+        this.assertEquals(_rows, int642int(addOn.RecId), strFmt('Rows of %1 on %2 in Error', _warehouseId, _countingDate));
+
+        select firstonly ErrorMessage from addOn
+            where addOn.FileName     == _fileName
+               && addOn.WarehouseId  == _warehouseId
+               && addOn.CountingDate == _countingDate;
+        this.assertEquals(_expectedPrefix, subStr(addOn.ErrorMessage, 1, strLen(_expectedPrefix)),
+            strFmt('ErrorMessage of %1 on %2', _warehouseId, _countingDate));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertSteps</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// How often the create, post and archive steps ran for the journal group of _warehouseId.
+    /// </summary>
+    private void assertSteps(TEST_MD12FaultInjectingBatchService _service,
+                             SJPMDInventCountingWarehouseId      _warehouseId,
+                             int                                 _creates,
+                             int                                 _posts,
+                             int                                 _archives)
+    {
+        this.assertEquals(_creates, _service.callsFor(_warehouseId, TEST_MD12FaultInjectingBatchService::StepCreate),
+            strFmt('Journal creations for warehouse %1', _warehouseId));
+        this.assertEquals(_posts, _service.callsFor(_warehouseId, TEST_MD12FaultInjectingBatchService::StepPost),
+            strFmt('Postings for warehouse %1', _warehouseId));
+        this.assertEquals(_archives, _service.callsFor(_warehouseId, TEST_MD12FaultInjectingBatchService::StepArchive),
+            strFmt('Archive attempts for warehouse %1', _warehouseId));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertOnlyGroupInError</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The file's only rows left are the _rows of the journal group of _warehouseId, all in
+    /// Error with the flag, and the message starts with _expectedPrefix.
+    /// </summary>
+    private void assertOnlyGroupInError(SJPMDInventCountingFileName    _fileName,
+                                        SJPMDInventCountingWarehouseId _warehouseId,
+                                        int                            _rows,
+                                        str                            _expectedPrefix)
+    {
+        SJPMDInventCountingAddOn addOn;
+        str                      expected = strRTrim(_expectedPrefix);
+        str                      message;
+
+        select count(RecId) from addOn
+            where addOn.FileName    == _fileName
+               && addOn.WarehouseId == _warehouseId
+               && addOn.Status      == SJPMDInventCountingStatus::Error
+               && addOn.ErrorFlag   == NoYes::Yes;
+        this.assertEquals(_rows, int642int(addOn.RecId), strFmt('Rows of warehouse %1 in Error with the flag', _warehouseId));
+        this.assertEquals(_rows, this.rowsOf(_fileName), 'No other row of the file is left');
+
+        message = this.errorMessageOf(_fileName, _warehouseId);
+        this.assertEquals(expected, subStr(message, 1, strLen(expected)), strFmt('ErrorMessage of warehouse %1', _warehouseId));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rowsOf</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Staging rows of the file, in any status.
+    /// </summary>
+    private int rowsOf(SJPMDInventCountingFileName _fileName)
+    {
+        SJPMDInventCountingAddOn addOn;
+
+        select count(RecId) from addOn
+            where addOn.FileName == _fileName;
+
+        return int642int(addOn.RecId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>rowsWithStatus</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Staging rows of one warehouse of the file in the given status.
+    /// </summary>
+    private int rowsWithStatus(SJPMDInventCountingFileName    _fileName,
+                               SJPMDInventCountingWarehouseId _warehouseId,
+                               SJPMDInventCountingStatus      _status)
+    {
+        SJPMDInventCountingAddOn addOn;
+
+        select count(RecId) from addOn
+            where addOn.FileName    == _fileName
+               && addOn.WarehouseId == _warehouseId
+               && addOn.Status      == _status;
+
+        return int642int(addOn.RecId);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>errorMessageOf</Name>
+				<Source><![CDATA[
+    private str errorMessageOf(SJPMDInventCountingFileName _fileName, SJPMDInventCountingWarehouseId _warehouseId)
+    {
+        SJPMDInventCountingAddOn addOn;
+
+        select firstonly ErrorMessage from addOn
+            where addOn.FileName    == _fileName
+               && addOn.WarehouseId == _warehouseId;
+
+        return addOn.ErrorMessage;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>contains</Name>
+				<Source><![CDATA[
+    private boolean contains(str _text, str _part)
+    {
+        return _part && strScan(_text, _part, 1, strLen(_text)) > 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteOwnRows</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The class runs without rollback: remove the staging and archive rows of its own files.
+    /// </summary>
+    private void deleteOwnRows()
+    {
+        SJPMDInventCountingAddOn   addOn;
+        SJPMDInventCountingArchive archive;
+
+        ttsbegin;
+        delete_from addOn
+            where addOn.FileName like #OwnFiles;
+        delete_from archive
+            where archive.FileName like #OwnFiles;
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

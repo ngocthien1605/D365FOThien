@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD31FaultInjectingBatchService</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// Test double for TEST_MD31RetryTest. Replaces SJPMDItemMasterImportBatchService.processSku, so
+/// a test can make chosen SKUs throw a chosen exception for a chosen number of calls without
+/// creating any product. A call that does not throw "completes" the SKU by deleting its input
+/// rows, as archiveSku does. processGroup and processSkuSafe - the code under test - run unchanged.
+/// Records how often processSku ran per SKU and the skuCreated flag each call started with.
+/// </summary>
+public final class TEST_MD31FaultInjectingBatchService extends SJPMDItemMasterImportBatchService
+{
+    // sku_cd -> [Exception, number of failing calls, infolog message, set skuCreated before throwing]
+    Map faultsBySku;
+    Set skusLeftNew;
+    Map callsBySku;
+    Map createdSeenBySku;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>new</Name>
+				<Source><![CDATA[
+    protected void new()
+    {
+        super();
+
+        faultsBySku      = new Map(Types::String, Types::Container);
+        skusLeftNew      = new Set(Types::String);
+        callsBySku       = new Map(Types::String, Types::Integer);
+        createdSeenBySku = new Map(Types::String, Types::Integer);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>construct</Name>
+				<Source><![CDATA[
+    public static TEST_MD31FaultInjectingBatchService construct()
+    {
+        return new TEST_MD31FaultInjectingBatchService();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>addFault</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The first _failingCalls calls of processSku for the SKU throw _exception (maxInt() = every
+    /// call). _infologMessage, when given, is written as an error on every call, including the
+    /// ones that do not throw. _setCreatedBeforeThrow simulates a product that was committed
+    /// before the failure (the archive step failed).
+    /// </summary>
+    public TEST_MD31FaultInjectingBatchService addFault(
+        SJPMDItemMasterJANCode _skuCd,
+        Exception              _exception,
+        int                    _failingCalls,
+        str                    _infologMessage        = '',
+        boolean                _setCreatedBeforeThrow = false)
+    {
+        faultsBySku.insert(_skuCd, [_exception, _failingCalls, _infologMessage, _setCreatedBeforeThrow]);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>leaveNew</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// processSku returns without touching the SKU's rows, so they stay New.
+    /// </summary>
+    public TEST_MD31FaultInjectingBatchService leaveNew(SJPMDItemMasterJANCode _skuCd)
+    {
+        skusLeftNew.add(_skuCd);
+
+        return this;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>callsFor</Name>
+				<Source><![CDATA[
+    public int callsFor(SJPMDItemMasterJANCode _skuCd)
+    {
+        return callsBySku.exists(_skuCd) ? callsBySku.lookup(_skuCd) : 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>createdFlagSeenOnLastCall</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The value of skuCreated when the last processSku call for the SKU started.
+    /// </summary>
+    public boolean createdFlagSeenOnLastCall(SJPMDItemMasterJANCode _skuCd)
+    {
+        return createdSeenBySku.exists(_skuCd) && createdSeenBySku.lookup(_skuCd) != 0;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>processSku</Name>
+				<Source><![CDATA[
+    protected void processSku(str _executionId, int _processingGroup, SJPMDItemMasterJANCode _skuCd, str _fileName)
+    {
+        int       calls = this.callsFor(_skuCd) + 1;
+        container fault;
+        Exception faultException;
+        int       failingCalls;
+        str       infologMessage;
+        boolean   setCreatedBeforeThrow;
+
+        callsBySku.insert(_skuCd, calls);
+        createdSeenBySku.insert(_skuCd, skuCreated ? 1 : 0);
+
+        if (skusLeftNew.in(_skuCd))
+        {
+            return;
+        }
+
+        if (faultsBySku.exists(_skuCd))
+        {
+            fault = faultsBySku.lookup(_skuCd);
+            [faultException, failingCalls, infologMessage, setCreatedBeforeThrow] = fault;
+
+            if (infologMessage)
+            {
+                error(infologMessage);
+            }
+
+            if (calls <= failingCalls)
+            {
+                if (setCreatedBeforeThrow)
+                {
+                    skuCreated = true;
+                }
+
+                throw faultException;
+            }
+        }
+
+        this.completeSku(_executionId, _processingGroup, _skuCd, _fileName);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>completeSku</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Removes the SKU partition's input rows, as a successful archiveSku does.
+    /// </summary>
+    private void completeSku(str _executionId, int _processingGroup, SJPMDItemMasterJANCode _skuCd, str _fileName)
+    {
+        SJPMDItemMaster itemMaster;
+
+        ttsbegin;
+        delete_from itemMaster
+            where itemMaster.ExecutionId     == _executionId
+               && itemMaster.ProcessingGroup == _processingGroup
+               && itemMaster.sku_cd          == _skuCd
+               && itemMaster.Status          == SJPMDInventImportStatus::New
+               && (!_fileName || itemMaster.file_name == _fileName);
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

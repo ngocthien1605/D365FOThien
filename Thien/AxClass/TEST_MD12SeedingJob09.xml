@@ -6,11 +6,13 @@
 /// <summary>
 /// MD12 test case 15 - error isolation between journal groups.
 /// Seeds ONE file holding two journal groups (split by counting date):
-///   - today     : valid items, must post and then be archived (rows disappear
+///   - yesterday : valid items, must post and then be archived (rows disappear
 ///                 from SJPMDInventCountingAddOn, appear in the archive as Completed).
-///   - yesterday : a deliberately non-existent ItemId, must fail validation and
+///   - today     : a deliberately non-existent ItemId, must fail validation and
 ///                 leave its rows at Status = Error with ErrorFlag = Yes.
-/// The run must NOT abort: the good group is expected to complete regardless.
+/// The run must NOT abort: the good group is expected to complete regardless. The good group is
+/// the earlier date: counts of a warehouse are posted in date order, so a failed earlier count
+/// would hold back a later one of the same warehouse (MDInventCounting_EarlierCountUnresolved).
 /// </summary>
 public final class TEST_MD12SeedingJob09
 {
@@ -39,8 +41,8 @@ public final class TEST_MD12SeedingJob09
     {
         SJPMDInventCountingWarehouseId warehouseId = TEST_MD12SeedDataHelper::resolveWarehouse(1, _warehouseA);
         SJPMDInventCountingLocationId  locationId  = TEST_MD12SeedDataHelper::resolveLocation(warehouseId);
-        SJPMDInventCountingDate        goodDate    = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
-        SJPMDInventCountingDate        badDate     = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet() - 1);
+        SJPMDInventCountingDate        goodDate    = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet() - 1);
+        SJPMDInventCountingDate        badDate     = TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet());
         container                      items       = TEST_MD12SeedDataHelper::resolveItems(warehouseId, #GoodItemCount);
         ItemId                         itemId;
         int                            idx;

@@ -8,8 +8,8 @@
 /// Seeds EIGHT journal groups in one file by varying the counting date over
 /// eight consecutive days, so the case works with a single warehouse.
 /// Run the batch with NumOfThreads = 4: SJPMDInventCountingService::assignProcessingGroups
-/// must spread the 8 groups over ProcessingGroup 1..4 (two groups each), and
-/// every row of a given group must carry the same ProcessingGroup.
+/// splits by warehouse, so all 8 groups of the single warehouse go to ProcessingGroup 1
+/// (one worker task, which posts them in counting-date order); no other task is created.
 /// Expect 8 counting journals.
 /// </summary>
 public final class TEST_MD12SeedingJob10

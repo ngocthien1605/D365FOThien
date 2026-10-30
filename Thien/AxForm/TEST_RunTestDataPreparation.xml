@@ -1,0 +1,396 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
+	<Name>TEST_RunTestDataPreparation</Name>
+	<SourceCode>
+		<Methods xmlns="">
+			<Method>
+				<Name>classDeclaration</Name>
+				<Source><![CDATA[
+[Form]
+public class TEST_RunTestDataPreparation extends FormRun
+{
+}
+]]></Source>
+			</Method>
+			<Method>
+				<Name>init</Name>
+				<Source><![CDATA[
+    public void init()
+    {
+        super();
+
+        element.clearResultFields();
+        LogMessageOutput.text('');
+        element.setStatus(TEST_RunTestDataPreparationStatus::New);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setStatus</Name>
+				<Source><![CDATA[
+    private void setStatus(TEST_RunTestDataPreparationStatus _status)
+    {
+        switch (_status)
+        {
+            case TEST_RunTestDataPreparationStatus::New:
+                StatusOutput.text("@SJP:TEST_RunTestDataPreparationStatus_New");
+                break;
+            case TEST_RunTestDataPreparationStatus::Error:
+                StatusOutput.text("@SJP:TEST_RunTestDataPreparationStatus_Error");
+                break;
+            case TEST_RunTestDataPreparationStatus::Succeeded:
+                StatusOutput.text("@SJP:TEST_RunTestDataPreparationStatus_Succeeded");
+                break;
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>clearResultFields</Name>
+				<Source><![CDATA[
+    private void clearResultFields()
+    {
+        JournalIdOutput.text('');
+        SalesIdOutput.text('');
+        InvoiceIdOutput.text('');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>appendLog</Name>
+				<Source><![CDATA[
+    private void appendLog(str _message)
+    {
+        str logText = LogMessageOutput.text();
+
+        if (!_message)
+        {
+            return;
+        }
+
+        if (logText)
+        {
+            logText += '; ';
+        }
+
+        logText += _message;
+        LogMessageOutput.text(logText);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>appendInfologToLogMessage</Name>
+				<Source><![CDATA[
+    private void appendInfologToLogMessage()
+    {
+        SysInfologEnumerator    enumerator = SysInfologEnumerator::newData(infolog.cut());
+        SysInfologMessageStruct messageStruct;
+
+        while (enumerator.moveNext())
+        {
+            messageStruct = new SysInfologMessageStruct(enumerator.currentMessage());
+
+            if (messageStruct)
+            {
+                element.appendLog(messageStruct.message());
+            }
+        }
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>runSmokeJob</Name>
+				<Source><![CDATA[
+    private void runSmokeJob()
+    {
+        ItemId           itemIdValue          = ItemIdInput.text();
+        InventLocationId inventLocationIdValue = InventLocationIdInput.text();
+        JournalId        journalIdValue;
+        SalesId          salesIdValue;
+        CustInvoiceJour  custInvoiceJour;
+
+        element.setStatus(TEST_RunTestDataPreparationStatus::New);
+        element.clearResultFields();
+        LogMessageOutput.text('');
+
+        infolog.clear();
+
+        try
+        {
+            if (!InventTable::find(itemIdValue).RecId)
+            {
+                itemIdValue = TEST_CreateReleasedProductJob::createReleasedProduct(itemIdValue);
+                info(strFmt("@SJP:TEST_RunTestDataPreparation_ItemCreatedFmt", itemIdValue));
+            }
+
+            journalIdValue = TEST_CreateAndPostMovementJournalJob::createAndPostForItem(itemIdValue, 1, 1000, inventLocationIdValue);
+
+            if (InventJournalTable::find(journalIdValue).Posted != NoYes::Yes)
+            {
+                throw error(strFmt("@SJP:TEST_RunTestDataPreparation_JournalNotPostedFmt", journalIdValue));
+            }
+
+            info(journalIdValue);
+
+            salesIdValue = TEST_CreateAndPostSalesOrderInvoiceJob::createAndPostSalesInvoice(itemIdValue, 1, inventLocationIdValue);
+
+            select firstonly custInvoiceJour
+                order by RecId desc
+                where custInvoiceJour.SalesId == salesIdValue;
+
+            if (!custInvoiceJour.RecId)
+            {
+                throw error(strFmt("@SJP:TEST_RunTestDataPreparation_SalesNotFoundFmt", salesIdValue));
+            }
+
+            info(strFmt("@SJP:TEST_RunTestDataPreparation_InvoiceCreatedFmt", custInvoiceJour.InvoiceId, salesIdValue));
+
+            ItemIdInput.text(itemIdValue);
+            JournalIdOutput.text(journalIdValue);
+            SalesIdOutput.text(salesIdValue);
+            InvoiceIdOutput.text(custInvoiceJour.InvoiceId);
+
+            element.setStatus(TEST_RunTestDataPreparationStatus::Succeeded);
+        }
+        catch (Exception::CLRError)
+        {
+            error("@SJP:TEST_RunTestDataPreparation_ClrError");
+            element.setStatus(TEST_RunTestDataPreparationStatus::Error);
+        }
+        catch (Exception::Error)
+        {
+            element.setStatus(TEST_RunTestDataPreparationStatus::Error);
+        }
+
+        element.appendInfologToLogMessage();
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+		<DataSources xmlns="" />
+		<DataControls xmlns="">
+			<Control>
+				<Name>RunSmokeJobButton</Name>
+				<Type>Button</Type>
+				<Methods>
+					<Method>
+						<Name>clicked</Name>
+						<Source><![CDATA[
+        public void clicked()
+        {
+            super();
+            element.runSmokeJob();
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>ItemIdInput</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>validate</Name>
+						<Source><![CDATA[
+        /// <summary>
+        ///
+        /// </summary>
+        /// <returns></returns>
+        public boolean validate()
+        {
+            boolean ret;
+
+            return true;
+            //ret = super();
+
+            //return ret;
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+			<Control>
+				<Name>InventLocationIdInput</Name>
+				<Type>String</Type>
+				<Methods>
+					<Method>
+						<Name>validate</Name>
+						<Source><![CDATA[
+        public boolean validate()
+        {
+            return true;
+        }
+
+]]></Source>
+					</Method>
+				</Methods>
+			</Control>
+		</DataControls>
+		<Members xmlns="" />
+	</SourceCode>
+	<DataSources />
+	<Design>
+		<Caption xmlns="">@SJP:TEST_RunTestDataPreparation</Caption>
+		<Pattern xmlns="">Dialog</Pattern>
+		<PatternVersion xmlns="">1.2</PatternVersion>
+		<ShowDeleteButton xmlns="">No</ShowDeleteButton>
+		<ShowNewButton xmlns="">No</ShowNewButton>
+		<Style xmlns="">Dialog</Style>
+		<Controls xmlns="">
+			<AxFormControl xmlns=""
+				i:type="AxFormGroupControl">
+				<Name>FormGroupControl</Name>
+				<HeightMode>SizeToAvailable</HeightMode>
+				<Pattern>Custom</Pattern>
+				<Type>Group</Type>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormButtonControl">
+						<Name>RunSmokeJobButton</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<Type>Button</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<Text>@SJP:TEST_RunTestDataPreparation_RunSmokeJob</Text>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>ItemIdInput</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<Type>String</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>ItemId</ExtendedDataType>
+						<Label>@SJP:TEST_RunTestDataPreparation_ItemId</Label>
+						<LabelPosition>Above</LabelPosition>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>InventLocationIdInput</Name>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<Type>String</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>InventLocationId</ExtendedDataType>
+						<Label>Warehouse</Label>
+						<LabelPosition>Above</LabelPosition>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>JournalIdOutput</Name>
+						<AllowEdit>No</AllowEdit>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<Type>String</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>JournalId</ExtendedDataType>
+						<Label>@SJP:TEST_RunTestDataPreparation_JournalId</Label>
+						<LabelPosition>Above</LabelPosition>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>SalesIdOutput</Name>
+						<AllowEdit>No</AllowEdit>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<Type>String</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>SalesId</ExtendedDataType>
+						<Label>@SJP:TEST_RunTestDataPreparation_SalesId</Label>
+						<LabelPosition>Above</LabelPosition>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>InvoiceIdOutput</Name>
+						<AllowEdit>No</AllowEdit>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<Type>String</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>InvoiceId</ExtendedDataType>
+						<Label>@SJP:TEST_RunTestDataPreparation_InvoiceId</Label>
+						<LabelPosition>Above</LabelPosition>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>StatusOutput</Name>
+						<AllowEdit>No</AllowEdit>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<Type>String</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>Name</ExtendedDataType>
+						<Label>@SJP:TEST_RunTestDataPreparation_Status</Label>
+						<LabelPosition>Above</LabelPosition>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormStringControl">
+						<Name>LogMessageOutput</Name>
+						<AllowEdit>No</AllowEdit>
+						<AutoDeclaration>Yes</AutoDeclaration>
+						<HeightMode>SizeToAvailable</HeightMode>
+						<Type>String</Type>
+						<WidthMode>SizeToAvailable</WidthMode>
+						<FormControlExtension
+							i:nil="true" />
+						<ExtendedDataType>Notes</ExtendedDataType>
+						<Label>@SJP:TEST_RunTestDataPreparation_LogMessage</Label>
+						<LabelPosition>Above</LabelPosition>
+						<MultiLine>Yes</MultiLine>
+					</AxFormControl>
+				</Controls>
+				<AllowUserSetup>No</AllowUserSetup>
+				<Style>DialogContent</Style>
+			</AxFormControl>
+			<AxFormControl xmlns=""
+				i:type="AxFormButtonGroupControl">
+				<Name>FormButtonGroupControl</Name>
+				<Type>ButtonGroup</Type>
+				<WidthMode>SizeToAvailable</WidthMode>
+				<FormControlExtension
+					i:nil="true" />
+				<Controls>
+					<AxFormControl xmlns=""
+						i:type="AxFormCommandButtonControl">
+						<Name>FormCommandButtonOK</Name>
+						<Type>CommandButton</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Command>OK</Command>
+						<Text>OK</Text>
+					</AxFormControl>
+					<AxFormControl xmlns=""
+						i:type="AxFormCommandButtonControl">
+						<Name>FormCommandButtonCancel</Name>
+						<Type>CommandButton</Type>
+						<FormControlExtension
+							i:nil="true" />
+						<Command>Cancel</Command>
+						<SaveRecord>No</SaveRecord>
+					</AxFormControl>
+				</Controls>
+				<ArrangeMethod>HorizontalRight</ArrangeMethod>
+				<Style>DialogCommitContainer</Style>
+			</AxFormControl>
+		</Controls>
+	</Design>
+	<Parts />
+</AxForm>

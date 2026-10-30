@@ -1,0 +1,244 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD12VolumeSeedJob</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD12 volume test - seeding. Inserts about 10,000 SJPMDInventCountingAddOn staging rows for
+/// one file: warehouses x counting dates x items per journal group (default 50 x 2 x 100), from
+/// real master data of the current company: warehouses on the site configured in
+/// SJPMDInventCountingParam, and items with on-hand in each warehouse (TEST_MD12SeedDataHelper).
+/// If the site has fewer warehouses, more items are taken per warehouse so the total stays the same.
+///
+/// Seeded inputs only: Quantity is the COUNTED quantity (current on-hand plus a small amount).
+/// MD12 derives the journal line's Qty = Counted - on-hand itself. The older date is counted
+/// at on-hand + 2 and today at on-hand + 1, so today's journal lines decrease stock by 1 after
+/// the older count is posted: both directions are posted.
+///
+/// Purges the file's staging rows first, so it can be run again; archive rows of earlier runs
+/// stay. The ExecutionId records the run for TEST_MD12VolumeVerifyJob, independently of what MD12
+/// leaves behind: file name + _YYYYMMDDHHMMSS + _J<highest InventJournalTable RecId before
+/// seeding> + _R<rows> _G<journal groups> _I<distinct group items> _Q<total counted quantity>.
+///
+/// Run from the browser: ?mi=SysClassRunner&cls=TEST_MD12VolumeSeedJob, or from the form
+/// TEST_MD12RunTestData. Then run MD12 with FileName = TEST_MD12_VOL01, and afterwards
+/// TEST_MD12VolumeVerifyJob. Unlike the unit tests, the MD12 run posts real journals.
+/// </summary>
+public final class TEST_MD12VolumeSeedJob
+{
+    #define.FileName('TEST_MD12_VOL01')
+    #define.Warehouses(50)
+    #define.CountingDates(2)
+    #define.ItemsPerGroup(100)
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>main</Name>
+				<Source><![CDATA[
+    public static void main(Args _args)
+    {
+        info(TEST_MD12VolumeSeedJob::seed());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seed</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Seeds the file and returns a one-line summary with the expected outcome.
+    /// </summary>
+    public static str seed(int                         _warehouses    = #Warehouses,
+                           int                         _countingDates = #CountingDates,
+                           int                         _itemsPerGroup = #ItemsPerGroup,
+                           SJPMDInventCountingFileName _fileName      = #FileName)
+    {
+        int                            targetRows    = _warehouses * _countingDates * _itemsPerGroup;
+        container                      warehouses    = TEST_MD12SeedDataHelper::resolveWarehouses(_warehouses);
+        int                            warehouseCount = conLen(warehouses);
+        int                            itemsPerGroup = _itemsPerGroup;
+        SJPMDInventCountingExecutionId executionId;
+        RecordInsertList               insertList    = new RecordInsertList(tableNum(SJPMDInventCountingAddOn));
+        SJPMDInventCountingWarehouseId warehouseId;
+        SJPMDInventCountingLocationId  locationId;
+        SJPMDInventCountingDate        countingDate;
+        container                      locations;
+        container                      itemsPerWarehouse;
+        container                      onHandsPerWarehouse;
+        container                      items;
+        container                      onHands;
+        Set                            groupItems    = new Set(Types::String);
+        ItemId                         itemId;
+        real                           onHand;
+        real                           counted;
+        real                           totalCounted  = 0;
+        int                            warehouseIdx;
+        int                            dateIdx;
+        int                            itemIdx;
+        int                            rows   = 0;
+        int                            purged;
+
+        if (_warehouses <= 0 || _countingDates <= 0 || _itemsPerGroup <= 0 || !_fileName)
+        {
+            throw error('TEST_MD12: warehouses, counting dates and items per group must be positive, and a file name is required.');
+        }
+
+        // Fewer warehouses on the site than asked: more items per warehouse, same total.
+        if (warehouseCount < _warehouses)
+        {
+            itemsPerGroup = (targetRows + warehouseCount * _countingDates - 1) div (warehouseCount * _countingDates);
+        }
+
+        // Resolve all master data first, so the expectations can go into the ExecutionId before
+        // the rows that carry it are inserted.
+        for (warehouseIdx = 1; warehouseIdx <= warehouseCount; warehouseIdx++)
+        {
+            warehouseId = conPeek(warehouses, warehouseIdx);
+            items       = TEST_MD12SeedDataHelper::resolveItems(warehouseId, itemsPerGroup);
+            onHands     = conNull();
+
+            for (itemIdx = 1; itemIdx <= conLen(items); itemIdx++)
+            {
+                onHand   = max(0, TEST_MD12SeedDataHelper::onHandQty(conPeek(items, itemIdx), warehouseId));
+                onHands += [onHand];
+
+                for (dateIdx = 1; dateIdx <= _countingDates; dateIdx++)
+                {
+                    countingDate  = TEST_MD12VolumeSeedJob::countingDate(_countingDates, dateIdx);
+                    totalCounted += TEST_MD12VolumeSeedJob::countedQty(onHand, _countingDates, dateIdx);
+                    groupItems.add(countingDate + '-' + warehouseId + '|' + conPeek(items, itemIdx));
+                    rows++;
+                }
+            }
+
+            locations           += [TEST_MD12SeedDataHelper::resolveLocation(warehouseId)];
+            itemsPerWarehouse   += [items];
+            onHandsPerWarehouse += [onHands];
+        }
+
+        executionId = TEST_MD12VolumeSeedJob::newExecutionId(_fileName, rows, warehouseCount * _countingDates, groupItems.elements(), totalCounted);
+        rows        = 0;
+
+        ttsbegin;
+        purged = TEST_MD12SeedDataHelper::purgeFileName(_fileName);
+
+        for (warehouseIdx = 1; warehouseIdx <= warehouseCount; warehouseIdx++)
+        {
+            warehouseId = conPeek(warehouses, warehouseIdx);
+            locationId  = conPeek(locations, warehouseIdx);
+            items       = conPeek(itemsPerWarehouse, warehouseIdx);
+            onHands     = conPeek(onHandsPerWarehouse, warehouseIdx);
+
+            // Oldest date first; the last date is today.
+            for (dateIdx = 1; dateIdx <= _countingDates; dateIdx++)
+            {
+                countingDate = TEST_MD12VolumeSeedJob::countingDate(_countingDates, dateIdx);
+
+                for (itemIdx = 1; itemIdx <= conLen(items); itemIdx++)
+                {
+                    itemId  = conPeek(items, itemIdx);
+                    counted = TEST_MD12VolumeSeedJob::countedQty(conPeek(onHands, itemIdx), _countingDates, dateIdx);
+                    rows++;
+
+                    insertList.add(TEST_MD12SeedDataHelper::initRow(
+                        _fileName,
+                        executionId,
+                        'V' + strRFix(int2Str(rows), 9, '0'),
+                        countingDate,
+                        warehouseId,
+                        locationId,
+                        itemId,
+                        counted));
+                }
+            }
+        }
+
+        insertList.insertDatabase();
+        ttscommit;
+
+        return strFmt('VOL | file %1 | execution %2 | %3 warehouses x %4 dates x %5 items = %6 rows in %7 journal groups | run MD12 with FileName = %1 | expect %7 posted journals, 0 rows New, 0 rows Error | purged %8',
+                      _fileName, executionId, warehouseCount, _countingDates, itemsPerGroup, rows, warehouseCount * _countingDates, purged);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>seedFile</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Seeds _fileName with the default sizes.
+    /// </summary>
+    public static str seedFile(SJPMDInventCountingFileName _fileName)
+    {
+        return TEST_MD12VolumeSeedJob::seed(#Warehouses, #CountingDates, #ItemsPerGroup, _fileName);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>countingDate</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The counting date of date number _dateIdx: the oldest first, the last one today.
+    /// </summary>
+    private static SJPMDInventCountingDate countingDate(int _countingDates, int _dateIdx)
+    {
+        return TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet() - (_countingDates - _dateIdx));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>countedQty</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The counted quantity of date number _dateIdx: on-hand + 1 for the last date, + 1 more for
+    /// each older date.
+    /// </summary>
+    private static real countedQty(real _onHand, int _countingDates, int _dateIdx)
+    {
+        return _onHand + (_countingDates - _dateIdx) + 1;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>newExecutionId</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// File name + _YYYYMMDDHHMMSS, like the ADF load, + _J and the highest InventJournalTable
+    /// RecId now (every journal the MD12 run creates afterwards has a higher RecId), + the
+    /// expected rows, journal groups, distinct group items and total counted quantity.
+    /// </summary>
+    private static SJPMDInventCountingExecutionId newExecutionId(
+        SJPMDInventCountingFileName _fileName,
+        int                         _rows,
+        int                         _groups,
+        int                         _groupItems,
+        real                        _totalCounted)
+    {
+        InventJournalTable journalTable;
+        int                secs = timeNow();
+
+        select maxof(RecId) from journalTable
+            where journalTable.RecId > 0;
+
+        return strFmt('%1_%2%3%4%5_J%6_R%7_G%8_I%9',
+                      _fileName,
+                      TEST_MD12SeedDataHelper::dateToYYYYMMDD(systemDateGet()),
+                      strRFix(int2Str(secs div 3600), 2, '0'),
+                      strRFix(int2Str((secs mod 3600) div 60), 2, '0'),
+                      strRFix(int2Str(secs mod 60), 2, '0'),
+                      int642Str(journalTable.RecId),
+                      _rows,
+                      _groups,
+                      _groupItems)
+            + '_Q' + num2Str(_totalCounted, 0, 2, 1, 0);
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

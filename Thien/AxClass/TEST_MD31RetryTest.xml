@@ -1,0 +1,521 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_MD31RetryTest</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// MD31 item master import - retry and per-SKU isolation of parallel runs:
+/// SJPMDItemMasterImportBatchService.processSkuSafe and the keyset loop in processGroup.
+///
+/// Faults are injected with TEST_MD31FaultInjectingBatchService, which replaces processSku, so
+/// these tests check the handling around a SKU, not the product logic (TEST_MD31RegressionTest
+/// covers that). A collision between real worker tasks cannot be produced in a unit test.
+///
+/// Runs with TestTransactionMode::None: the code under test must run at tts level 0, because
+/// X++ skips catch blocks inside a transaction and allows retry only outside one. Nothing is
+/// rolled back, so the class writes only SJPMDItemMaster input rows of its own files
+/// (TEST_MD31_TC2n) - the double never creates products - and deletes them in setUp and tearDown.
+/// </summary>
+[SysTestTarget(classStr(SJPMDItemMasterImportBatchService), UtilElementType::Class)]
+[SysTestTransaction(TestTransactionMode::None)]
+public final class TEST_MD31RetryTest extends SysTestCase
+{
+    guid suiteLockToken;
+    #OCCRetryCount
+    // Seeded rows stay in processing group 0 until the orchestrator assigns them.
+    #define.UnassignedGroup(0)
+    // Input files of this class; setUp and tearDown delete their rows.
+    #define.OwnFiles('TEST_MD31_TC2*')
+    // TC35-TC38 files, outside the TC2* pattern; deleteOwnRows removes them too.
+    #define.OwnFiles3('TEST_MD31_TC3*')
+    // Must match the macros in SJPMDItemMasterImportService.
+    #define.MD31LockScope('MD31.ItemMaster')
+    #define.MD31LockKey('Process')
+    // TEST_SuiteLock scope: one run of this class at a time across sessions.
+    #define.SuiteLockScope('TEST.MD31RetryTest')
+
+    TEST_AtlDataMD31 md31;
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>setUpTestCase</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The class commits its rows and shares file names between runs, so only one run may go at
+    /// a time; a second run fails here with the owner of the first.
+    /// </summary>
+    public void setUpTestCase()
+    {
+        super();
+
+        suiteLockToken = TEST_SuiteLock::acquire(#SuiteLockScope);
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tearDownTestCase</Name>
+				<Source><![CDATA[
+    public void tearDownTestCase()
+    {
+        TEST_SuiteLock::release(#SuiteLockScope, suiteLockToken);
+
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>setUp</Name>
+				<Source><![CDATA[
+    public void setUp()
+    {
+        super();
+
+        md31 = AtlDataRootNode::construct().md31();
+
+        // Rows left by an earlier run that stopped before tearDown.
+        this.deleteOwnRows();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tearDown</Name>
+				<Source><![CDATA[
+    public void tearDown()
+    {
+        this.deleteOwnRows();
+
+        super();
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc21_deadlockOnce_isRetried</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC21: the SKU's first attempt is a deadlock victim. processSkuSafe retries it and the
+    /// second attempt completes it; the SKU does not end in Error.
+    /// </summary>
+    [SysTestMethod]
+    public void tc21_deadlockOnce_isRetried()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC21';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC21S001';
+        TEST_MD31FaultInjectingBatchService service = TEST_MD31FaultInjectingBatchService::construct()
+            .addFault(Sku, Exception::Deadlock, 1);
+
+        md31.initRow(TestFile, Sku).save();
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertEquals(2, service.callsFor(Sku), 'One failed attempt and one retry');
+        md31.rows().forFileName(TestFile).assertCount(0, 'The retried SKU is completed; no input row is left');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc22_deadlockEveryTime_skuInErrorNextSkuCompleted</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC22: the first SKU deadlocks on every attempt. After #RetryNum retries it ends in Error
+    /// with the retry-limit message, and the loop continues: the next SKU of the group is
+    /// completed. Before the fix, the deadlock ended the whole group and left both SKUs New.
+    /// </summary>
+    [SysTestMethod]
+    public void tc22_deadlockEveryTime_skuInErrorNextSkuCompleted()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC22';
+        const SJPMDItemMasterJANCode BadSku   = 'ZT31TC22S001';
+        const SJPMDItemMasterJANCode GoodSku  = 'ZT31TC22S002';
+        TEST_MD31FaultInjectingBatchService service = TEST_MD31FaultInjectingBatchService::construct()
+            .addFault(BadSku, Exception::Deadlock, maxInt());
+
+        md31.initRow(TestFile, BadSku).save();
+        md31.initRow(TestFile, GoodSku).save();
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertEquals(#RetryNum + 1, service.callsFor(BadSku), 'The first attempt and #RetryNum retries');
+        this.assertEquals(1, service.callsFor(GoodSku), 'The next SKU is processed after the failed one');
+        this.assertOnlySkuInError(TestFile, BadSku, strFmt("@SJP:MDItemMasterImport_DeadlockRetryExceeded", BadSku));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc23_updateConflictOnce_isRetried</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC23: an update conflict (another session changed a row between read and update) is
+    /// retried at tts level 0 and the second attempt completes the SKU.
+    /// </summary>
+    [SysTestMethod]
+    public void tc23_updateConflictOnce_isRetried()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC23';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC23S001';
+        TEST_MD31FaultInjectingBatchService service = TEST_MD31FaultInjectingBatchService::construct()
+            .addFault(Sku, Exception::UpdateConflict, 1);
+
+        md31.initRow(TestFile, Sku).save();
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertEquals(2, service.callsFor(Sku), 'One failed attempt and one retry');
+        md31.rows().forFileName(TestFile).assertCount(0, 'The retried SKU is completed; no input row is left');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc24_duplicateKeyEveryTime_skuInErrorNextSkuCompleted</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC24: a duplicate key on every attempt (for example a product number another product
+    /// already holds). After #RetryNum retries the SKU ends in Error and the next SKU is completed.
+    /// </summary>
+    [SysTestMethod]
+    public void tc24_duplicateKeyEveryTime_skuInErrorNextSkuCompleted()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC24';
+        const SJPMDItemMasterJANCode BadSku   = 'ZT31TC24S001';
+        const SJPMDItemMasterJANCode GoodSku  = 'ZT31TC24S002';
+        TEST_MD31FaultInjectingBatchService service = TEST_MD31FaultInjectingBatchService::construct()
+            .addFault(BadSku, Exception::DuplicateKeyException, maxInt());
+
+        md31.initRow(TestFile, BadSku).save();
+        md31.initRow(TestFile, GoodSku).save();
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertEquals(#RetryNum + 1, service.callsFor(BadSku), 'The first attempt and #RetryNum retries');
+        this.assertEquals(1, service.callsFor(GoodSku), 'The next SKU is processed after the failed one');
+        this.assertOnlySkuInError(TestFile, BadSku, strFmt("@SJP:MDItemMasterImport_DuplicateKeyRetryExceeded", BadSku, ''));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc25_clrError_notRetriedSkuInErrorNextSkuCompleted</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC25: an exception that is not a collision (here CLRError) is not retried. The SKU ends
+    /// in Error with the unexpected-error message and the next SKU is completed.
+    /// </summary>
+    [SysTestMethod]
+    public void tc25_clrError_notRetriedSkuInErrorNextSkuCompleted()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC25';
+        const SJPMDItemMasterJANCode BadSku   = 'ZT31TC25S001';
+        const SJPMDItemMasterJANCode GoodSku  = 'ZT31TC25S002';
+        TEST_MD31FaultInjectingBatchService service = TEST_MD31FaultInjectingBatchService::construct()
+            .addFault(BadSku, Exception::CLRError, maxInt());
+
+        md31.initRow(TestFile, BadSku).save();
+        md31.initRow(TestFile, GoodSku).save();
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertEquals(1, service.callsFor(BadSku), 'No retry for an exception that is not a collision');
+        this.assertEquals(1, service.callsFor(GoodSku), 'The next SKU is processed after the failed one');
+        this.assertOnlySkuInError(TestFile, BadSku, strFmt("@SJP:MDItemMasterImport_UnexpectedError", BadSku, ''));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc26_retryKeepsCreatedFlag_nextSkuStartsClear</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC26: the product of the first SKU was committed, then its archive step deadlocked. The
+    /// retry still sees skuCreated = true, so the archive row would say Created, not Updated.
+    /// The next SKU starts with the flag cleared.
+    /// </summary>
+    [SysTestMethod]
+    public void tc26_retryKeepsCreatedFlag_nextSkuStartsClear()
+    {
+        const Filename               TestFile  = 'TEST_MD31_TC26';
+        const SJPMDItemMasterJANCode RetrySku  = 'ZT31TC26S001';
+        const SJPMDItemMasterJANCode NextSku   = 'ZT31TC26S002';
+        TEST_MD31FaultInjectingBatchService service = TEST_MD31FaultInjectingBatchService::construct()
+            .addFault(RetrySku, Exception::Deadlock, 1, '', true);
+
+        md31.initRow(TestFile, RetrySku).save();
+        md31.initRow(TestFile, NextSku).save();
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertEquals(2, service.callsFor(RetrySku), 'One failed attempt and one retry');
+        this.assertTrue(service.createdFlagSeenOnLastCall(RetrySku), 'The retry keeps skuCreated from the committed first attempt');
+        this.assertFalse(service.createdFlagSeenOnLastCall(NextSku), 'Each SKU starts with skuCreated cleared');
+        md31.rows().forFileName(TestFile).assertCount(0, 'Both SKUs are completed');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc27_errorMessage_holdsOnlyOwnInfolog</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC27: the first SKU succeeds but writes an infolog message; the second fails with its own
+    /// message. The second SKU's ErrorMessage holds only what was logged during its own attempt.
+    /// Before the fix, collectInfologErrors took the whole infolog, so the first SKU's message
+    /// ended up in the second SKU's ErrorMessage.
+    /// </summary>
+    [SysTestMethod]
+    public void tc27_errorMessage_holdsOnlyOwnInfolog()
+    {
+        const Filename               TestFile   = 'TEST_MD31_TC27';
+        const SJPMDItemMasterJANCode QuietSku   = 'ZT31TC27S001';
+        const SJPMDItemMasterJANCode FailingSku = 'ZT31TC27S002';
+        const str                    QuietNote  = 'TC27 note of the first SKU';
+        const str                    FaultNote  = 'TC27 fault of the second SKU';
+        TEST_MD31FaultInjectingBatchService service = TEST_MD31FaultInjectingBatchService::construct()
+            .addFault(QuietSku, Exception::CLRError, 0, QuietNote)
+            .addFault(FailingSku, Exception::CLRError, 1, FaultNote);
+        str message;
+
+        md31.initRow(TestFile, QuietSku).save();
+        md31.initRow(TestFile, FailingSku).save();
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertOnlySkuInError(TestFile, FailingSku, strFmt("@SJP:MDItemMasterImport_UnexpectedError", FailingSku, ''));
+
+        message = this.errorMessageOf(TestFile, FailingSku);
+        this.assertTrue(strScan(message, FaultNote, 1, strLen(message)) > 0, strFmt('The SKU\'s own message is kept. ErrorMessage: %1', message));
+        this.assertTrue(strScan(message, QuietNote, 1, strLen(message)) == 0, strFmt('The first SKU\'s message must not leak in. ErrorMessage: %1', message));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc28_skuLeftNew_loopEndsAndRowIsPending</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC28: a SKU stays New after its attempt (for example marking it Error failed too). The
+    /// keyset loop visits it once, does not loop on it, processes the next SKU, and
+    /// countPendingRows reports the row - which makes SJPMDItemMasterImportBatchTask fail the group.
+    /// </summary>
+    [SysTestMethod]
+    public void tc28_skuLeftNew_loopEndsAndRowIsPending()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC28';
+        const SJPMDItemMasterJANCode StuckSku = 'ZT31TC28S001';
+        const SJPMDItemMasterJANCode NextSku  = 'ZT31TC28S002';
+        TEST_MD31FaultInjectingBatchService service = TEST_MD31FaultInjectingBatchService::construct()
+            .leaveNew(StuckSku);
+
+        md31.initRow(TestFile, StuckSku).save();
+        md31.initRow(TestFile, NextSku).save();
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertEquals(1, service.callsFor(StuckSku), 'The SKU left New is visited once');
+        this.assertEquals(1, service.callsFor(NextSku), 'The next SKU is still processed');
+        this.assertEquals(1, int642int(service.countPendingRows(#UnassignedGroup, TestFile)), 'The SKU left New is reported as pending');
+
+        md31.rows().forFileName(TestFile).assertExpectedLinesSet(AtlSpecifications::construct()
+            .addSpec(md31.rowSpec().withSkuCode(StuckSku).withStatus(SJPMDInventImportStatus::New)),
+            'Only the SKU left New remains');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc35_blankKey_isProcessed</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC35: a row whose ExecutionId and sku_cd are both blank (malformed input) sorts first.
+    /// The keyset loop has no lower bound on its first pass, so it visits that row and then the
+    /// next SKU. Before the fix the loop started after ('', '') and skipped the blank key on
+    /// every run, leaving it New.
+    /// </summary>
+    [SysTestMethod]
+    public void tc35_blankKey_isProcessed()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC35';
+        const SJPMDItemMasterJANCode NextSku  = 'ZT31TC35S001';
+        TEST_MD31FaultInjectingBatchService service = TEST_MD31FaultInjectingBatchService::construct();
+
+        md31.initRow(TestFile, '').setExecutionId('').save();
+        md31.initRow(TestFile, NextSku).save();
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertEquals(1, service.callsFor(''), 'The blank key is visited');
+        this.assertEquals(1, service.callsFor(NextSku), 'The next SKU is processed after it');
+        md31.rows().forFileName(TestFile).assertCount(0, 'Both are completed; no input row is left');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc36_connectionLostOnce_isRetried</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC36: the database connection drops once while the SKU is processed. The row is valid,
+    /// so the attempt is retried (not marked Error) and the SKU is completed.
+    /// </summary>
+    [SysTestMethod]
+    public void tc36_connectionLostOnce_isRetried()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC36';
+        const SJPMDItemMasterJANCode Sku      = 'ZT31TC36S001';
+        TEST_MD31FaultInjectingBatchService service = TEST_MD31FaultInjectingBatchService::construct()
+            .addFault(Sku, Exception::TransientSqlConnectionError, 1);
+
+        md31.initRow(TestFile, Sku).save();
+
+        service.processGroup(#UnassignedGroup, TestFile);
+
+        this.assertEquals(2, service.callsFor(Sku), 'One lost attempt and one retry');
+        md31.rows().forFileName(TestFile).assertCount(0, 'The retried SKU is completed; no input row is left');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc37_connectionLostEveryTime_groupStopsRowsStayNew</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC37: the database connection stays lost. After #RetryNum retries processGroup stops
+    /// with the connection error: the SKU stays New (not Error, which a later run would skip),
+    /// the next SKU is not started, and countPendingRows reports both, so
+    /// SJPMDItemMasterImportBatchTask fails and the next run processes them.
+    /// </summary>
+    [SysTestMethod]
+    public void tc37_connectionLostEveryTime_groupStopsRowsStayNew()
+    {
+        const Filename               TestFile = 'TEST_MD31_TC37';
+        const SJPMDItemMasterJANCode LostSku  = 'ZT31TC37S001';
+        const SJPMDItemMasterJANCode NextSku  = 'ZT31TC37S002';
+        TEST_MD31FaultInjectingBatchService service = TEST_MD31FaultInjectingBatchService::construct()
+            .addFault(LostSku, Exception::TransientSqlConnectionError, maxInt());
+        boolean stopped;
+
+        md31.initRow(TestFile, LostSku).save();
+        md31.initRow(TestFile, NextSku).save();
+
+        try
+        {
+            service.processGroup(#UnassignedGroup, TestFile);
+        }
+        catch (Exception::TransientSqlConnectionError)
+        {
+            stopped = true;
+        }
+
+        this.assertTrue(stopped, 'processGroup stops with the connection error');
+        this.assertEquals(#RetryNum + 1, service.callsFor(LostSku), 'Every retry was used');
+        this.assertEquals(0, service.callsFor(NextSku), 'The next SKU is not started');
+        this.assertEquals(2, int642int(service.countPendingRows(#UnassignedGroup, TestFile)), 'Both rows stay New and are reported as pending');
+        md31.rows().forFileName(TestFile).assertExpectedLinesSet(AtlSpecifications::construct()
+            .addSpec(md31.rowSpec().withSkuCode(LostSku).withStatus(SJPMDInventImportStatus::New))
+            .addSpec(md31.rowSpec().withSkuCode(NextSku).withStatus(SJPMDInventImportStatus::New)),
+            'No row is turned into Error');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>tc38_countFailsAfterLock_lockReleased</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// TC38: the orchestrator takes the MD31 run lock, then its first query (countNewRows)
+    /// fails. The lock must be released, or no later run could start. Uses the real MD31 lock
+    /// scope, so it fails when an MD31 run is going on.
+    /// </summary>
+    [SysTestMethod]
+    public void tc38_countFailsAfterLock_lockReleased()
+    {
+        TEST_MD31GroupAssigningService service  = TEST_MD31GroupAssigningService::construct();
+        SJPMDItemMasterImportContract  contract = new SJPMDItemMasterImportContract();
+        boolean                        failed;
+
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#MD31LockScope, #MD31LockKey), 'Precondition: no MD31 run holds the lock');
+
+        contract.parmNumOfThreads(1);
+        contract.parmFileName('TEST_MD31_TC38');
+        service.failCountNewRows();
+
+        try
+        {
+            service.orchestrate(contract);
+        }
+        catch (Exception::Error)
+        {
+            failed = true;
+        }
+
+        this.assertTrue(failed, 'orchestrate fails');
+        this.assertFalse(SJPMDIntegrationRunLock::isLocked(#MD31LockScope, #MD31LockKey), 'The run lock is released');
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>assertOnlySkuInError</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The file's only input row left is the SKU's, in Error with the flag, and its message
+    /// starts with _expectedPrefix.
+    /// </summary>
+    private void assertOnlySkuInError(Filename _fileName, SJPMDItemMasterJANCode _sku, str _expectedPrefix)
+    {
+        str expected = strRTrim(_expectedPrefix);
+        str message;
+
+        md31.rows().forFileName(_fileName).assertExpectedLinesSet(AtlSpecifications::construct()
+            .addSpec(md31.rowSpec().withSkuCode(_sku).withStatus(SJPMDInventImportStatus::Error).withErrorFlag(NoYes::Yes)),
+            strFmt('Only %1 is left, in Error', _sku));
+
+        message = this.errorMessageOf(_fileName, _sku);
+        this.assertEquals(expected, subStr(message, 1, strLen(expected)), strFmt('ErrorMessage of %1', _sku));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>errorMessageOf</Name>
+				<Source><![CDATA[
+    private str errorMessageOf(Filename _fileName, SJPMDItemMasterJANCode _sku)
+    {
+        SJPMDItemMaster itemMaster;
+
+        select firstonly ErrorMessage from itemMaster
+            where itemMaster.file_name == _fileName
+               && itemMaster.sku_cd    == _sku;
+
+        return itemMaster.ErrorMessage;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>deleteOwnRows</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The class runs without rollback: remove the input rows of its own files.
+    /// </summary>
+    private void deleteOwnRows()
+    {
+        SJPMDItemMaster itemMaster;
+
+        ttsbegin;
+        delete_from itemMaster
+            where itemMaster.file_name like #OwnFiles
+               || itemMaster.file_name like #OwnFiles3;
+        ttscommit;
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>

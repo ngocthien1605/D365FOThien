@@ -1,0 +1,353 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+	<Name>TEST_AutomationTestTask</Name>
+	<SourceCode>
+		<Declaration><![CDATA[
+/// <summary>
+/// Runs SysTest classes and single tests as a batch task, for the agent test loop.
+/// The UDE disables the standard SysTestServices web endpoint ("Running tests through
+/// SysTestServices service is disabled on this server"), which is only checked in
+/// SysTestService.runTestsService. This task calls the same engine, SysTestService.runTests,
+/// directly: the standard suite building, partition setup and clean-up, active-tests filter and
+/// XML result. TEST_AutomationService.runTests schedules it.
+///
+/// It writes to the task log, which the harness reads through TEST_AutomationService.batchJobStatus:
+///   XPPTEST|{"test":"Class.method","status":"PASS|FAIL|SKIP|NOTRUN","ms":..,"failures":"..","infolog":".."}
+///   XPPTESTRUN|{"runCount":..,"failureCount":..,"passed":..,"failed":..,"skipped":..,"notRun":..,"xmlChunks":..}
+///   XPPTESTXML|n|...   the standard result XML, in numbered chunks
+/// </summary>
+public final class TEST_AutomationTestTask extends RunBaseBatch implements BatchRetryable
+{
+    str testClasses;   // comma-separated class names
+    str tests;         // comma-separated Class.method names
+
+    #define.ResultPrefix('XPPTEST|')
+    #define.SummaryPrefix('XPPTESTRUN|')
+    #define.XmlPrefix('XPPTESTXML|')
+    #define.GroupName('XppLoop')
+    #define.XmlChunkLength(7000)
+    #define.MaxTextLength(2000)
+
+    #define.CurrentVersion(1)
+    #localmacro.CurrentList
+        testClasses,
+        tests
+    #endmacro
+}
+]]></Declaration>
+		<Methods>
+			<Method>
+				<Name>newTests</Name>
+				<Source><![CDATA[
+    public static TEST_AutomationTestTask newTests(str _testClasses, str _tests)
+    {
+        TEST_AutomationTestTask task = new TEST_AutomationTestTask();
+
+        task.parmTests(_testClasses, _tests);
+
+        return task;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>parmTests</Name>
+				<Source><![CDATA[
+    public void parmTests(str _testClasses, str _tests)
+    {
+        testClasses = _testClasses;
+        tests       = _tests;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>run</Name>
+				<Source><![CDATA[
+    public void run()
+    {
+        SysTestExecutionList  executionList = new SysTestExecutionList();
+        SysTestRunnerSettings settings      = new SysTestRunnerSettings();
+        SysTestResultInfo     resultInfo;
+        List                  classList     = TEST_AutomationTestTask::toList(testClasses);
+        List                  testList      = TEST_AutomationTestTask::toList(tests);
+        str                   resultXml;
+        container             counts;
+
+        executionList.groupName(#GroupName);
+        if (classList.elements())
+        {
+            executionList.testClasses(classList);
+        }
+        if (testList.elements())
+        {
+            executionList.tests(testList);
+        }
+
+        // The defaults of a Test Explorer run in the current partition.
+        settings.createPartition(false);
+        settings.parallelExecution(false);
+        settings.checkInTestsOnly(false);
+        settings.granularity('');
+        settings.traceFile('');
+        settings.createInteractionLog(false);
+
+        resultInfo = new SysTestService().runTests(executionList, settings);
+
+        if (!resultInfo)
+        {
+            throw error(strFmt('SysTestService.runTests returned no result for classes "%1" and tests "%2".', testClasses, tests));
+        }
+
+        resultXml = resultInfo.resultXml();
+
+        // Each result line carries the infolog of its test, so the run's own infolog is dropped:
+        // it keeps the result lines inside the infolog limit of the batch log.
+        infolog.clear();
+
+        counts = TEST_AutomationTestTask::writeTestLines(resultXml);
+        TEST_AutomationTestTask::writeSummary(resultInfo, counts, TEST_AutomationTestTask::writeXmlChunks(resultXml));
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>toList</Name>
+				<Source><![CDATA[
+    private static List toList(str _names)
+    {
+        List      result = new List(Types::String);
+        container names  = str2con(_names, ',', false);
+        str       name;
+        int       i;
+
+        for (i = 1; i <= conLen(names); i++)
+        {
+            name = strLTrim(strRTrim(conPeek(names, i)));
+
+            if (name)
+            {
+                result.addEnd(name);
+            }
+        }
+
+        return result;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>writeTestLines</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Writes one XPPTEST line per test-case element of the standard result XML (written by
+    /// SysTestListenerXML) and returns [passed, failed, skipped, notRun].
+    /// </summary>
+    private static container writeTestLines(str _resultXml)
+    {
+        System.Xml.XmlDocument doc;
+        System.Xml.XmlNodeList testCases;
+        System.Xml.XmlElement  testCase;
+        TEST_AutomationJson    json;
+        str                    status;
+        int                    passed;
+        int                    failed;
+        int                    skipped;
+        int                    notRun;
+        int                    i;
+
+        if (!_resultXml)
+        {
+            return [0, 0, 0, 0];
+        }
+
+        doc = new System.Xml.XmlDocument();
+        doc.LoadXml(_resultXml);
+        testCases = doc.SelectNodes('//test-case');
+
+        for (i = 0; i < testCases.get_Count(); i++)
+        {
+            testCase = testCases.Item(i);
+
+            if (testCase.GetAttribute('execution') == 'pending' && !testCase.GetAttribute('endtime'))
+            {
+                status = 'NOTRUN';
+                notRun++;
+            }
+            else if (testCase.GetAttribute('skipped') == 'true')
+            {
+                status = 'SKIP';
+                skipped++;
+            }
+            else if (testCase.GetAttribute('success') == 'true')
+            {
+                status = 'PASS';
+                passed++;
+            }
+            else
+            {
+                status = 'FAIL';
+                failed++;
+            }
+
+            json = TEST_AutomationJson::construct();
+            json.beginObject();
+            json.addString('test', testCase.GetAttribute('name'));
+            json.addString('status', status);
+            json.addInt('ms', str2Int64(testCase.GetAttribute('time')));
+            json.addString('failures', subStr(TEST_AutomationTestTask::joinNodes(testCase, 'failure/message', false), 1, #MaxTextLength));
+            json.addString('infolog', subStr(TEST_AutomationTestTask::joinNodes(testCase, 'infolog/*', true), 1, #MaxTextLength));
+            json.endObject();
+
+            if (status == 'PASS' || status == 'SKIP')
+            {
+                info(#ResultPrefix + json.toString());
+            }
+            else
+            {
+                warning(#ResultPrefix + json.toString());
+            }
+        }
+
+        return [passed, failed, skipped, notRun];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>joinNodes</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// The inner text of the nodes under _node that match _xpath, joined with " | ";
+    /// with _withName each text is prefixed with its element name (info, warning, error).
+    /// </summary>
+    private static str joinNodes(System.Xml.XmlNode _node, str _xpath, boolean _withName)
+    {
+        System.Xml.XmlNodeList nodes = _node.SelectNodes(_xpath);
+        System.Xml.XmlNode     node;
+        str                    result = '';
+        int                    i;
+
+        for (i = 0; i < nodes.get_Count(); i++)
+        {
+            node   = nodes.Item(i);
+            result += (result ? ' | ' : '') + (_withName ? node.get_LocalName() + ': ' : '') + node.get_InnerText();
+        }
+
+        return result;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>writeXmlChunks</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Writes the standard result XML as numbered XPPTESTXML lines and returns how many.
+    /// </summary>
+    private static int writeXmlChunks(str _resultXml)
+    {
+        int length = strLen(_resultXml);
+        int chunks = 0;
+        int position;
+
+        for (position = 1; position <= length; position += #XmlChunkLength)
+        {
+            chunks++;
+            info(strFmt('%1%2|%3', #XmlPrefix, chunks, subStr(_resultXml, position, #XmlChunkLength)));
+        }
+
+        return chunks;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>writeSummary</Name>
+				<Source><![CDATA[
+    private static void writeSummary(SysTestResultInfo _resultInfo, container _counts, int _xmlChunks)
+    {
+        TEST_AutomationJson json = TEST_AutomationJson::construct();
+
+        json.beginObject();
+        json.addInt('runCount', _resultInfo.runCount());
+        json.addInt('failureCount', _resultInfo.failureCount());
+        json.addInt('passed', conPeek(_counts, 1));
+        json.addInt('failed', conPeek(_counts, 2));
+        json.addInt('skipped', conPeek(_counts, 3));
+        json.addInt('notRun', conPeek(_counts, 4));
+        json.addInt('xmlChunks', _xmlChunks);
+        json.endObject();
+
+        info(#SummaryPrefix + json.toString());
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>pack</Name>
+				<Source><![CDATA[
+    public container pack()
+    {
+        return [#CurrentVersion, #CurrentList];
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>unpack</Name>
+				<Source><![CDATA[
+    public boolean unpack(container _packedClass)
+    {
+        Version version = RunBase::getVersion(_packedClass);
+
+        switch (version)
+        {
+            case #CurrentVersion:
+                [version, #CurrentList] = _packedClass;
+                break;
+            default:
+                return false;
+        }
+
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>canGoBatchJournal</Name>
+				<Source><![CDATA[
+    protected boolean canGoBatchJournal()
+    {
+        return true;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>isRetryable</Name>
+				<Source><![CDATA[
+    /// <summary>
+    /// Some tests commit data (TestTransactionMode::None), so a retry is not wanted.
+    /// </summary>
+    public boolean isRetryable()
+    {
+        return false;
+    }
+
+]]></Source>
+			</Method>
+			<Method>
+				<Name>description</Name>
+				<Source><![CDATA[
+    public static ClassDescription description()
+    {
+        return 'TEST automation unit test run';
+    }
+
+]]></Source>
+			</Method>
+		</Methods>
+	</SourceCode>
+</AxClass>
